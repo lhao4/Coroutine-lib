@@ -4,6 +4,7 @@
 
 - 项目：`mycoroutine`
 - 测试时间：2026-03-06
+- 文档更新时间：2026-03-06（性能测试完成后同步）
 - 测试目标：在 `Debug/Release` 以及启用网络 demo（含 `libevent`）条件下完成完整系统测试，并对结果做对比分析。
 
 ---
@@ -31,6 +32,7 @@
 | 网络 demo 构建 | `Debug + NETWORK_DEMOS=ON + libevent enabled` |
 | 自动化测试 | `ctest`（当前只有 `mycoroutine_smoke_test`） |
 | 运行态检查 | `coroutine_http_server` / `epoll_http_demo` / `libevent_http_demo` |
+| 性能基准 | `tests/mycoroutine_benchmark`（Debug/Release） |
 
 ---
 
@@ -80,6 +82,7 @@ cmake -S . -B build/debug-net-libevent -G Ninja \
   -DBUILD_TESTING=ON \
   -DMYCOROUTINE_BUILD_EXAMPLES=ON \
   -DMYCOROUTINE_BUILD_NETWORK_DEMOS=ON \
+  -DMYCOROUTINE_BUILD_BENCHMARKS=ON \
   -DPKG_CONFIG_EXECUTABLE=$PWD/.tools/pkgconf/bin/pkgconf
 
 cmake --build build/debug-net-libevent -j4
@@ -153,6 +156,57 @@ curl --noproxy '*'
 - 运行态联通测试（HTTP 实际请求）补齐了 demo 级验证。
 - 两者结合后，本轮测试链路完整性明显高于上次。
 
+## 6.4 微基准性能对比（Release）
+
+执行说明：
+- 基准程序：`build/release/tests/mycoroutine_benchmark`
+- 运行次数：2 轮，以下数据为均值
+
+| 基准项 | 操作数 | 平均耗时(s) | 平均吞吐(ops/s) | 平均单次开销(ns) |
+|---|---:|---:|---:|---:|
+| direct increment loop | 2,000,000 | 0.000664 | 3,168,463,888.64 | 0.33 |
+| fiber context switch | 600,000 | 0.305965 | 1,995,230.08 | 509.95 |
+| scheduler callbacks (workers=1) | 120,000 | 10.798903 | 11,317.51 | 89,990.85 |
+| scheduler callbacks (workers=4) | 120,000 | 12.719562 | 9,435.74 | 105,996.35 |
+| std::thread create+join | 8,000 | 1.079270 | 7,438.43 | 134,908.74 |
+
+分析：
+- 协程上下文切换达到约 `2.0M ops/s`，单次约 `0.51us`，说明协程切换本身开销较低。
+- 单线程调度回调吞吐（`11.3k ops/s`）显著高于“线程创建+销毁”基线（`7.4k ops/s`），约提升 `52%`。
+- 多 worker（4）场景未出现线性提升，反映当前全局任务队列和锁竞争对扩展性有约束。
+
+## 6.5 HTTP 并发请求对比（Release, 1000 requests, concurrency=32）
+
+测试方法：
+- 分别启动三个服务进程
+- 使用 `curl --noproxy '*'` 并发发起 1000 个本地请求
+
+| 服务 | 总耗时(s) | 吞吐(req/s) | 结果 |
+|---|---:|---:|---|
+| coroutine_http_server | 2.32 | 431.03 | 通过 |
+| epoll_http_demo | 2.17 | 460.83 | 通过 |
+| libevent_http_demo | 2.18 | 458.72 | 通过 |
+
+分析：
+- 当前协程示例在本地并发请求下可稳定提供 `~431 req/s`。
+- 与纯 epoll/libevent demo 相比，协程路径吞吐略低但处于同一量级，说明“可读性更高的协程执行模型”没有出现数量级性能退化。
+- 该结果是单机本地回环测试，适用于相对比较，不应直接外推到生产场景上限。
+
+## 6.6 补充复测与波动说明（同日）
+
+补充执行：
+- 基准程序：`build/release/tests/mycoroutine_benchmark`
+- 追加运行：4 轮（共享机器环境）
+
+观察结果：
+- `fiber context switch` 基本保持在 `~1.8M~2.1M ops/s`。
+- `scheduler callbacks (workers=4)` 结果较稳定，在 `~8.3k~9.6k ops/s`。
+- `scheduler callbacks (workers=1)` 波动较大，在 `~1.9k~8.1k ops/s` 区间。
+
+解释：
+- 本项目当前 benchmark 同时包含“调度执行 + 运行时构造/析构 + 共享环境竞争”因素，对系统噪声敏感。
+- 因此在文档中保留“完整测试轮次的均值”作为主对比口径，同时给出波动区间，避免误读为绝对上限性能。
+
 ---
 
 ## 7. 结论
@@ -163,6 +217,7 @@ curl --noproxy '*'
 4. 上次“未成功完成”的主要原因已排除：
    - `libevent` 检测问题：已解决
    - 本地请求超时问题：代理路径问题已解决
+5. 性能维度上，当前实现已体现出协程切换低开销；调度层吞吐在共享环境下有波动，后续应以更稳定基准环境持续评估。
 
 ---
 
@@ -172,4 +227,3 @@ curl --noproxy '*'
 2. 增加 `IOManager` 事件取消语义测试（`del/cancel/cancelAll`）。
 3. 增加定时器边界测试（同一触发时间、多循环定时器）。
 4. 增加并发压力测试与 Sanitizer（ASan/TSan/UBSan）。
-

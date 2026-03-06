@@ -71,6 +71,7 @@
 ├── examples/
 │   └── coroutine_http_server.cpp
 ├── tests/
+│   ├── bench/main.cpp
 │   ├── smoke/main.cpp
 │   ├── epoll/main.cpp
 │   └── libevent/main.cpp
@@ -81,7 +82,8 @@
     ├── WORKFLOW.md
     ├── USAGE.md
     ├── IMPROVEMENTS.md
-    └── RESUME.md
+    ├── RESUME.md
+    └── TEST_REPORT.md
 ```
 
 ## 快速开始
@@ -100,6 +102,21 @@ ctest --preset debug
 ./build/debug/examples/coroutine_http_server
 ```
 
+### 3) 运行性能基准（Release）
+
+```bash
+cmake --preset release
+cmake --build --preset release -j4
+./build/release/tests/mycoroutine_benchmark
+```
+
+### 4) 查看最新测试与性能报告
+
+`docs/TEST_REPORT.md` 已同步到最新测试结果（2026-03-06），包含：
+- Debug/Release 构建与 `ctest` 结果
+- `libevent` 网络 demo 构建与联通验证
+- 协程微基准与 HTTP 并发对比数据
+
 ## 编译与运行方式
 
 - 推荐构建方式：`CMakePresets.json`
@@ -107,6 +124,7 @@ ctest --preset debug
   - `BUILD_TESTING=ON`
   - `MYCOROUTINE_BUILD_EXAMPLES=ON`
   - `MYCOROUTINE_BUILD_NETWORK_DEMOS=OFF`
+  - `MYCOROUTINE_BUILD_BENCHMARKS=ON`（默认值）
 
 如需启用网络 demo（`tests/epoll`、`tests/libevent`）：
 
@@ -115,9 +133,23 @@ cmake -S . -B build/debug \
   -DCMAKE_BUILD_TYPE=Debug \
   -DBUILD_TESTING=ON \
   -DMYCOROUTINE_BUILD_EXAMPLES=ON \
-  -DMYCOROUTINE_BUILD_NETWORK_DEMOS=ON
+  -DMYCOROUTINE_BUILD_NETWORK_DEMOS=ON \
+  -DMYCOROUTINE_BUILD_BENCHMARKS=ON
 cmake --build build/debug -j
 ```
+
+## 最新测试快照（2026-03-06）
+
+- 自动化测试：`debug/release` 下 `ctest` 均为 `1/1 passed`
+- 微基准（Release）：
+  - `fiber context switch` 约 `2.0M ops/s`（约 `0.51us`/次）
+  - `scheduler callbacks (workers=1)` 在完整轮次均值约 `11.3k ops/s`
+  - 补充复测中 `workers=1` 波动较大（约 `1.9k~8.1k ops/s`）
+- HTTP 并发（1000 req, c=32）：
+  - `coroutine_http_server` 约 `431 req/s`
+  - `epoll_http_demo/libevent_http_demo` 约 `459~461 req/s`
+
+详细命令、原始结果和对比分析见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)。
 
 ## 最小使用示例
 
@@ -151,10 +183,11 @@ int main() {
 - [docs/USAGE.md](docs/USAGE.md)：编译、运行、API、排障
 - [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md)：当前不足与优化优先级
 - [docs/RESUME.md](docs/RESUME.md)：简历与面试表达模板
+- [docs/TEST_REPORT.md](docs/TEST_REPORT.md)：功能验证 + 性能基准 + 对比分析
 
 ## 项目状态说明
 
 - 状态：可运行、可学习、可继续演进
+- 最新验证：已完成系统测试与性能测试（见 `docs/TEST_REPORT.md`）
 - 适合：学习协程运行时、系统编程、网络事件驱动
 - 不适合：直接作为生产环境高可靠基础库
-

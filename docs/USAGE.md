@@ -28,6 +28,7 @@
 可选依赖（仅当开启网络 demo）：
 
 - `libevent`
+- `pkg-config`（`find_package(PkgConfig)` 依赖）
 
 ---
 
@@ -48,7 +49,8 @@ cmake -S . -B build/debug \
   -DCMAKE_BUILD_TYPE=Debug \
   -DBUILD_TESTING=ON \
   -DMYCOROUTINE_BUILD_EXAMPLES=ON \
-  -DMYCOROUTINE_BUILD_NETWORK_DEMOS=OFF
+  -DMYCOROUTINE_BUILD_NETWORK_DEMOS=OFF \
+  -DMYCOROUTINE_BUILD_BENCHMARKS=ON
 
 cmake --build build/debug -j
 ctest --test-dir build/debug --output-on-failure
@@ -61,8 +63,21 @@ cmake -S . -B build/debug \
   -DCMAKE_BUILD_TYPE=Debug \
   -DBUILD_TESTING=ON \
   -DMYCOROUTINE_BUILD_EXAMPLES=ON \
-  -DMYCOROUTINE_BUILD_NETWORK_DEMOS=ON
+  -DMYCOROUTINE_BUILD_NETWORK_DEMOS=ON \
+  -DMYCOROUTINE_BUILD_BENCHMARKS=ON
 cmake --build build/debug -j
+```
+
+如系统存在 `libevent` 但仍提示未检测到，请显式指定 `pkg-config` 可执行程序：
+
+```bash
+cmake -S . -B build/debug-net-libevent \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DBUILD_TESTING=ON \
+  -DMYCOROUTINE_BUILD_EXAMPLES=ON \
+  -DMYCOROUTINE_BUILD_NETWORK_DEMOS=ON \
+  -DMYCOROUTINE_BUILD_BENCHMARKS=ON \
+  -DPKG_CONFIG_EXECUTABLE=/path/to/pkg-config
 ```
 
 ---
@@ -79,6 +94,14 @@ cmake --build build/debug -j
 
 ```bash
 ./build/debug/examples/coroutine_http_server
+```
+
+### 4.3 运行性能基准（Release）
+
+```bash
+cmake --preset release
+cmake --build --preset release -j4
+./build/release/tests/mycoroutine_benchmark
 ```
 
 ---
@@ -237,9 +260,45 @@ int main() {
 - 确认 fd 仍有效且未被关闭
 - 确认 `epoll_ctl` 是否成功
 
+## 问题 5：`libevent` 未检测到
+
+排查：
+- 先确认 `libevent` 开发包是否安装（如 `libevent-dev`）
+- 确认 `pkg-config` 可执行文件可用：`pkg-config --modversion libevent`
+- 必要时通过 `-DPKG_CONFIG_EXECUTABLE=/path/to/pkg-config` 显式指定
+
 ---
 
-## 11. 推荐阅读顺序
+## 11. 性能基准测试
+
+项目已提供基准程序：`mycoroutine_benchmark`（`tests/bench/main.cpp`），用于评估：
+
+- 协程上下文切换开销
+- 调度器回调吞吐
+- 与 `std::thread` 创建/回收的相对开销
+
+建议使用 Release 构建执行：
+
+```bash
+cmake --preset release
+cmake --build --preset release -j4
+./build/release/tests/mycoroutine_benchmark
+```
+
+网络服务压测时建议显式绕过代理，避免把本地请求发到代理端口：
+
+```bash
+curl --noproxy '*'
+```
+
+最近一次完整测试结果见 `docs/TEST_REPORT.md`。关键结论：
+- `fiber context switch` 达到约 `2.0M ops/s`（Release）
+- `scheduler callbacks` 在共享环境下存在明显抖动，建议按报告中的“完整轮次均值 + 波动区间”共同解读
+- 本地 HTTP 并发测试下协程示例与 epoll/libevent demo 吞吐同量级
+
+---
+
+## 12. 推荐阅读顺序
 
 1. `README.md`
 2. `docs/ARCHITECTURE.md`
@@ -247,4 +306,3 @@ int main() {
 4. `docs/WORKFLOW.md`
 5. `docs/MODULES.md`
 6. `docs/IMPROVEMENTS.md`
-

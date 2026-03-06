@@ -2,6 +2,11 @@ add_executable(mycoroutine_smoke_test smoke/main.cpp)
 target_link_libraries(mycoroutine_smoke_test PRIVATE mycoroutine::mycoroutine)
 add_test(NAME mycoroutine_smoke_test COMMAND mycoroutine_smoke_test)
 
+if(MYCOROUTINE_BUILD_BENCHMARKS)
+    add_executable(mycoroutine_benchmark bench/main.cpp)
+    target_link_libraries(mycoroutine_benchmark PRIVATE mycoroutine::mycoroutine Threads::Threads)
+endif()
+
 if(MYCOROUTINE_BUILD_NETWORK_DEMOS)
     add_executable(epoll_http_demo epoll/main.cpp)
 

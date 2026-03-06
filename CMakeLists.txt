@@ -12,6 +12,7 @@ include(CTest)
 
 option(MYCOROUTINE_BUILD_EXAMPLES "Build example programs" ON)
 option(MYCOROUTINE_BUILD_NETWORK_DEMOS "Build long-running network demo targets" OFF)
+option(MYCOROUTINE_BUILD_BENCHMARKS "Build benchmark programs" ON)
 option(MYCOROUTINE_ENABLE_WARNINGS "Enable strict compiler warnings" ON)
 
 add_library(mycoroutine STATIC)
