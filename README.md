@@ -182,6 +182,7 @@ int main() {
 - [docs/WORKFLOW.md](docs/WORKFLOW.md)：启动到退出的完整运行流程与调用链
 - [docs/USAGE.md](docs/USAGE.md)：编译、运行、API、排障
 - [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md)：当前不足与优化优先级
+- [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md)：`v1.0.0` 已知限制与发布边界
 - [docs/RESUME.md](docs/RESUME.md)：简历与面试表达模板
 - [docs/TEST_REPORT.md](docs/TEST_REPORT.md)：功能验证 + 性能基准 + 对比分析
 
