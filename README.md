@@ -1,29 +1,18 @@
 # mycoroutine
 
-基于 C++17 的有栈协程库，核心包含 Fiber、Scheduler、IOManager、Hook 和 Timer。
+一个小型、可读性优先的 C++17 有栈协程库，核心基于 `ucontext` + 多线程调度器 + `epoll` + 定时器 + Hook。
 
-## 环境要求
+## 文档导航
 
-- Linux
-- CMake >= 3.20
-- C++17 编译器（GCC 9+/Clang 10+ 推荐）
-
-## 目录结构
-
-```text
-.
-├── CMakeLists.txt
-├── CMakePresets.json
-├── cmake/
-├── include/mycoroutine/
-├── src/
-├── examples/
-└── tests/
-```
+- [01. 项目概览与快速开始](docs/01_project_overview.md)
+- [02. 整体设计说明](docs/02_architecture_design.md)
+- [03. 模块划分与调用关系](docs/03_module_breakdown.md)
+- [04. 核心实现原理](docs/04_core_mechanisms.md)
+- [05. 使用示例](docs/05_usage_examples.md)
+- [06. 优化方向分析](docs/06_optimization_roadmap.md)
+- [07. 简历与面试表达](docs/07_resume_and_interview.md)
 
 ## 快速构建
-
-### 方式一：使用 Preset（推荐）
 
 ```bash
 cmake --preset debug
@@ -31,25 +20,8 @@ cmake --build --preset debug
 ctest --preset debug
 ```
 
-### 方式二：手动配置
+运行示例：
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+./build/debug/examples/coroutine_http_server
 ```
-
-## 安装与包导出
-
-```bash
-cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
-cmake --build build/release -j
-cmake --install build/release --prefix /usr/local
-```
-
-安装后会导出 CMake 包配置，可通过 `find_package(mycoroutine CONFIG REQUIRED)` 使用。
-
-## 可选目标
-
-- `MYCOROUTINE_BUILD_EXAMPLES=ON|OFF`：是否构建示例，默认 `ON`
-- `MYCOROUTINE_BUILD_NETWORK_DEMOS=ON|OFF`：是否构建 `tests/epoll` 与 `tests/libevent` 里的网络 demo，默认 `OFF`
