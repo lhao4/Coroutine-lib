@@ -1,3 +1,0 @@
-# 协程HTTP服务器示例
-add_executable(coroutine_http_server coroutine_http_server.cpp)
-target_link_libraries(coroutine_http_server mycoroutine)

@@ -1,3 +1,0 @@
-/root/share/coroutine-lib/test/epoll/build/CMakeFiles/echo_server.dir
-/root/share/coroutine-lib/test/epoll/build/CMakeFiles/edit_cache.dir
-/root/share/coroutine-lib/test/epoll/build/CMakeFiles/rebuild_cache.dir

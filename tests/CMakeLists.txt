@@ -1,0 +1,20 @@
+add_executable(mycoroutine_smoke_test smoke/main.cpp)
+target_link_libraries(mycoroutine_smoke_test PRIVATE mycoroutine::mycoroutine)
+add_test(NAME mycoroutine_smoke_test COMMAND mycoroutine_smoke_test)
+
+if(MYCOROUTINE_BUILD_NETWORK_DEMOS)
+    add_executable(epoll_http_demo epoll/main.cpp)
+
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LIBEVENT QUIET libevent)
+    endif()
+
+    if(LIBEVENT_FOUND)
+        add_executable(libevent_http_demo libevent/main.cpp)
+        target_include_directories(libevent_http_demo PRIVATE ${LIBEVENT_INCLUDE_DIRS})
+        target_link_libraries(libevent_http_demo PRIVATE ${LIBEVENT_LIBRARIES})
+    else()
+        message(STATUS "libevent not found, skip libevent_http_demo target")
+    endif()
+endif()

@@ -1,32 +1,31 @@
-# 忽略可执行文件
+# Build directories
+build/
+out/
+cmake-build-*/
+
+# CMake/Ninja artifacts
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+cmake_install.cmake
+compile_commands.json
+Testing/
+
+# Binaries and objects
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
 *.exe
 *.out
-*.o
-*.so
-*.dll
-*.dylib
 
-# 忽略编译生成的文件
-test
-
-# 忽略操作系统生成的文件
+# Editor and OS files
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
-
-# 忽略临时文件
 *.swp
 *.swo
 *~
-
-# 忽略IDE相关文件
-.vscode/
-.idea/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-.trae/
-.cladeu/
-build/
-.gitignore
