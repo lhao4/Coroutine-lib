@@ -164,6 +164,11 @@ retry:
     {
         // 获取当前IO管理器
         mycoroutine::IOManager* iom = mycoroutine::IOManager::GetThis();
+        if(!iom) 
+        {
+            // Not running inside IOManager thread, fallback to original syscall path.
+            return fun(fd, std::forward<Args>(args)...);
+        }
         // 定时器指针
         std::shared_ptr<mycoroutine::Timer> timer;
         // 弱引用，用于定时器回调中检查资源是否还存在
@@ -389,6 +394,10 @@ int connect_with_timeout(int fd, const struct sockaddr* addr, socklen_t addrlen,
 
     // 连接进行中，等待可写事件（表示连接成功或失败）
     mycoroutine::IOManager* iom = mycoroutine::IOManager::GetThis();
+    if(!iom) 
+    {
+        return connect_f(fd, addr, addrlen);
+    }
     std::shared_ptr<mycoroutine::Timer> timer;
     std::shared_ptr<timer_info> tinfo(new timer_info);
     std::weak_ptr<timer_info> winfo(tinfo);
@@ -434,6 +443,7 @@ int connect_with_timeout(int fd, const struct sockaddr* addr, socklen_t addrlen,
             timer->cancel();
         }
         std::cerr << "connect addEvent(" << fd << ", WRITE) error";
+        return -1;
     }
 
     // 检查连接是否成功建立
@@ -773,7 +783,7 @@ int fcntl(int fd, int cmd, ... /* arg */ )
         case F_GETOWN_EX:    // 获取扩展所有者信息
         case F_SETOWN_EX:    // 设置扩展所有者信息
             {
-                struct f_owner_exlock* arg = va_arg(va, struct f_owner_exlock*);
+                struct f_owner_ex* arg = va_arg(va, struct f_owner_ex*);
                 va_end(va);
                 return fcntl_f(fd, cmd, arg);
             }

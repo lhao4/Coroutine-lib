@@ -68,6 +68,12 @@ public:
 	bool isClosed() const {return m_isClosed;}
 
 	/**
+	 * @brief 设置文件描述符关闭状态
+	 * @param v 是否关闭
+	 */
+	void setClosed(bool v) {m_isClosed = v;}
+
+	/**
 	 * @brief 设置用户层面非阻塞状态
 	 * @param v 是否非阻塞
 	 */

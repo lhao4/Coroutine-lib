@@ -9,7 +9,7 @@
 #include <mycoroutine/iomanager.h>  // IO管理器头文件
 
 // 调试标志，用于控制调试信息输出
-static bool debug = true;
+static bool debug = false;
 
 namespace mycoroutine {
 
@@ -172,6 +172,11 @@ void IOManager::contextResize(size_t size)
  */
 int IOManager::addEvent(int fd, Event event, std::function<void()> cb) 
 {
+    if (fd < 0) 
+    {
+        return -1;
+    }
+
     // 尝试获取文件描述符对应的上下文
     FdContext *fd_ctx = nullptr;
     
@@ -224,7 +229,8 @@ int IOManager::addEvent(int fd, Event event, std::function<void()> cb)
     // 更新事件上下文
     FdContext::EventContext& event_ctx = fd_ctx->getEventContext(event);
     assert(!event_ctx.scheduler && !event_ctx.fiber && !event_ctx.cb);
-    event_ctx.scheduler = Scheduler::GetThis();
+    // Event callback/fiber should always be scheduled by this IOManager instance.
+    event_ctx.scheduler = this;
     if (cb) 
     {
         // 使用回调函数
@@ -281,7 +287,7 @@ bool IOManager::delEvent(int fd, Event event) {
     if (rt) 
     {
         std::cerr << "delEvent::epoll_ctl failed: " << strerror(errno) << std::endl; 
-        return -1;
+        return false;
     }
 
     // 减少待处理事件计数
@@ -338,7 +344,7 @@ bool IOManager::cancelEvent(int fd, Event event) {
     if (rt) 
     {
         std::cerr << "cancelEvent::epoll_ctl failed: " << strerror(errno) << std::endl; 
-        return -1;
+        return false;
     }
 
     // 减少待处理事件计数
@@ -388,7 +394,7 @@ bool IOManager::cancelAll(int fd) {
     if (rt) 
     {
         std::cerr << "IOManager::epoll_ctl failed: " << strerror(errno) << std::endl; 
-        return -1;
+        return false;
     }
 
     // 触发并清理读事件

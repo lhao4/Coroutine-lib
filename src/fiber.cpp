@@ -278,8 +278,19 @@ void Fiber::MainFunc()
     std::shared_ptr<Fiber> curr = GetThis();
     assert(curr != nullptr);
 
-    // 执行协程回调函数
-    curr->m_cb();
+    try
+    {
+        // 执行协程回调函数
+        curr->m_cb();
+    }
+    catch (const std::exception& ex)
+    {
+        std::cerr << "Fiber::MainFunc caught exception: " << ex.what() << std::endl;
+    }
+    catch (...)
+    {
+        std::cerr << "Fiber::MainFunc caught unknown exception" << std::endl;
+    }
     
     // 执行完成后清除回调函数，避免循环引用
     curr->m_cb = nullptr;
@@ -295,6 +306,9 @@ void Fiber::MainFunc()
     
     // 让出执行权，返回到调用者协程
     raw_ptr->yield();
+
+    // The control flow should never continue after yielding out.
+    assert(false && "Fiber::MainFunc should not return after yield()");
 }
 
 }

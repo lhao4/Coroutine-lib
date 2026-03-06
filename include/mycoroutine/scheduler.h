@@ -1,9 +1,7 @@
 #ifndef __MYCOROUTINE_SCHEDULER_H_
 #define __MYCOROUTINE_SCHEDULER_H_
 
-// 调度器头文件定义
-// 注意：hook.h头文件被注释掉了，暂时没有使用
-//#include "hook.h"
+#include <mycoroutine/hook.h>
 #include <mycoroutine/fiber.h>    // 包含协程相关头文件
 #include <mycoroutine/thread.h>   // 包含线程相关头文件
 

@@ -1,7 +1,7 @@
 #include <mycoroutine/scheduler.h>
 
 // 调试开关，设置为true可以输出更多调试信息
-static bool debug = true;
+static bool debug = false;
 
 namespace mycoroutine {
 
@@ -112,7 +112,7 @@ void Scheduler::run()
     int thread_id = Thread::GetThreadId();
     if(debug) std::cout << "Schedule::run() starts in thread: " << thread_id << std::endl;
     
-    //set_hook_enable(true);
+    set_hook_enable(true);
 
     // 设置当前线程的调度器
     SetThis();

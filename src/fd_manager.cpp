@@ -189,6 +189,10 @@ void FdManager::del(int fd)
 		return;
 	}
 	// 重置智能指针，释放资源
+	if(m_datas[fd])
+	{
+		m_datas[fd]->setClosed(true);
+	}
 	m_datas[fd].reset();
 }
 

@@ -12,10 +12,7 @@
 #include <arpa/inet.h>      // 网络地址转换函数
 #include <fcntl.h>          // 文件控制函数
 #include <iostream>         // 标准输入输出
-#include <stack>
 #include <cstring>          // 字符串处理函数
-#include <chrono>
-#include <thread>
 
 /**
  * @brief 监听套接字文件描述符
@@ -38,16 +35,6 @@ void error(const char *msg)
     perror(msg);           // 打印系统错误信息
     printf("erreur...\n");  // 打印自定义错误提示
     exit(1);               // 退出程序，返回错误码1
-}
-
-/**
- * @brief 监听IO读事件
- * @details 为监听套接字添加读事件回调
- */
-void watch_io_read()
-{
-    // 获取当前IO管理器实例，并为监听套接字添加读事件，回调函数为test_accept
-    mycoroutine::IOManager::GetThis()->addEvent(sock_listen_fd, mycoroutine::IOManager::READ, test_accept);
 }
 
 /**
@@ -141,8 +128,7 @@ void test_accept()
 void test_iomanager()
 {
     int portno = 8080;                       // 服务器监听端口
-    struct sockaddr_in server_addr, client_addr; // 服务器和客户端地址结构体
-    (void)client_addr;  // 客户端地址结构体，用于消除未使用变量警告
+    struct sockaddr_in server_addr; // 服务器地址结构体
 
     // 创建TCP套接字（这里会被hook）
     sock_listen_fd = socket(AF_INET, SOCK_STREAM, 0);

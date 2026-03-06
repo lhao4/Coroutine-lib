@@ -144,7 +144,16 @@ Timer::Timer(uint64_t ms, std::function<void()> cb, bool recurring, TimerManager
 bool Timer::Comparator::operator()(const std::shared_ptr<Timer>& lhs, const std::shared_ptr<Timer>& rhs) const
 {
     assert(lhs != nullptr && rhs != nullptr);
-    return lhs->m_next < rhs->m_next;
+    if (lhs->m_next < rhs->m_next) 
+    {
+        return true;
+    }
+    if (rhs->m_next < lhs->m_next) 
+    {
+        return false;
+    }
+    // Tie-break by address to keep strict weak ordering in std::set.
+    return lhs.get() < rhs.get();
 }
 
 // ============================================================================
@@ -224,8 +233,8 @@ std::shared_ptr<Timer> TimerManager::addConditionTimer(uint64_t ms, std::functio
 // ============================================================================
 uint64_t TimerManager::getNextTimer()
 {
-    // 获取读锁以保护共享数据
-    std::shared_lock<std::shared_mutex> read_lock(m_mutex);
+    // Need exclusive lock because m_tickled is updated here.
+    std::unique_lock<std::shared_mutex> write_lock(m_mutex);
     
     // 重置m_tickled标志，表示已查询过下一次超时时间
     m_tickled = false;
