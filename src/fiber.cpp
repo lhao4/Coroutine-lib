@@ -1,9 +1,79 @@
 #include <mycoroutine/fiber.h>
+#include <mycoroutine/thread.h>
+
+#include <cstring>
+#include <cstdint>
+#include <cstdlib>
+#include <memory>
+#include <unordered_map>
+#include <sys/ucontext.h>
 
 // 调试模式开关，设置为true时会输出协程的创建、销毁和切换信息
 static bool debug = false;
 
 namespace mycoroutine {
+
+namespace {
+
+struct SharedStackSlot {
+    char* stack = nullptr;
+    size_t size = 0;
+    std::weak_ptr<Fiber> owner;
+};
+
+class SharedStackPool {
+public:
+    SharedStackPool(size_t slot_count, size_t slot_size) {
+        if (slot_count == 0) {
+            slot_count = 1;
+        }
+        m_slots.resize(slot_count);
+        for (auto& slot : m_slots) {
+            slot.stack = static_cast<char*>(malloc(slot_size));
+            assert(slot.stack != nullptr);
+            slot.size = slot_size;
+            slot.owner.reset();
+        }
+    }
+
+    ~SharedStackPool() {
+        for (auto& slot : m_slots) {
+            free(slot.stack);
+            slot.stack = nullptr;
+            slot.owner.reset();
+            slot.size = 0;
+        }
+    }
+
+    SharedStackSlot* acquireSlot() {
+        assert(!m_slots.empty());
+        SharedStackSlot* slot = &m_slots[m_next % m_slots.size()];
+        ++m_next;
+        return slot;
+    }
+
+private:
+    std::vector<SharedStackSlot> m_slots;
+    size_t m_next = 0;
+};
+
+static SharedStackSlot* ToSharedStackSlot(void* slot) {
+    return reinterpret_cast<SharedStackSlot*>(slot);
+}
+
+static uintptr_t GetContextStackPointer(const ucontext_t& ctx) {
+#if defined(__x86_64__) && defined(REG_RSP)
+    return static_cast<uintptr_t>(ctx.uc_mcontext.gregs[REG_RSP]);
+#elif defined(__i386__) && defined(REG_ESP)
+    return static_cast<uintptr_t>(ctx.uc_mcontext.gregs[REG_ESP]);
+#elif defined(__aarch64__)
+    return static_cast<uintptr_t>(ctx.uc_mcontext.sp);
+#else
+#error "shared stack currently supports x86_64/i386/aarch64"
+#endif
+}
+
+} // namespace
 
 /**
  * 线程局部存储变量，保存当前线程相关的协程信息
@@ -19,11 +89,30 @@ static thread_local std::shared_ptr<Fiber> t_thread_fiber = nullptr;
 // 调度协程指针，用于协程间切换回调度器
 static thread_local Fiber* t_scheduler_fiber = nullptr;
 
+// 共享栈池（按栈大小分桶）
+static thread_local std::unordered_map<size_t, std::unique_ptr<SharedStackPool>> t_shared_stack_pools;
+
 // 全局协程ID计数器，用于为每个协程分配唯一ID
 static std::atomic<uint64_t> s_fiber_id{0};
 
 // 当前系统中协程总数计数器
 static std::atomic<uint64_t> s_fiber_count{0};
+
+// 每个线程共享栈槽位数量
+static std::atomic<size_t> s_shared_stack_slot_count{8};
+
+static SharedStackPool* GetSharedStackPool(size_t stack_size) {
+    auto it = t_shared_stack_pools.find(stack_size);
+    if (it != t_shared_stack_pools.end()) {
+        return it->second.get();
+    }
+
+    auto pool = std::make_unique<SharedStackPool>(
+        s_shared_stack_slot_count.load(std::memory_order_relaxed), stack_size);
+    SharedStackPool* raw_pool = pool.get();
+    t_shared_stack_pools.emplace(stack_size, std::move(pool));
+    return raw_pool;
+}
 
 /**
  * @brief 设置当前正在运行的协程
@@ -52,7 +141,7 @@ std::shared_ptr<Fiber> Fiber::GetThis()
     std::shared_ptr<Fiber> main_fiber(new Fiber());
     t_thread_fiber = main_fiber;
     t_scheduler_fiber = main_fiber.get(); // 默认情况下，主协程也是调度协程
-    
+
     assert(t_fiber == main_fiber.get());
     return t_fiber->shared_from_this();
 }
@@ -80,6 +169,149 @@ uint64_t Fiber::GetFiberId()
     return (uint64_t)-1;
 }
 
+void Fiber::SetSharedStackSlotCount(size_t slot_count)
+{
+    if (slot_count == 0) {
+        slot_count = 1;
+    }
+    s_shared_stack_slot_count.store(slot_count, std::memory_order_relaxed);
+}
+
+size_t Fiber::GetSharedStackSlotCount()
+{
+    return s_shared_stack_slot_count.load(std::memory_order_relaxed);
+}
+
+void Fiber::initFiberContext()
+{
+    assert(m_stack != nullptr && m_stacksize > 0);
+
+    // 获取当前上下文作为基础
+    if(getcontext(&m_ctx))
+    {
+        std::cerr << "initFiberContext() failed\n";
+        pthread_exit(NULL);
+    }
+
+    // 设置上下文属性
+    m_ctx.uc_link = nullptr;
+    m_ctx.uc_stack.ss_sp = m_stack;
+    m_ctx.uc_stack.ss_size = m_stacksize;
+
+    // 创建协程上下文，设置入口函数为MainFunc
+    makecontext(&m_ctx, &Fiber::MainFunc, 0);
+    m_ctxInitialized = true;
+}
+
+void Fiber::saveSharedStackSnapshot()
+{
+    if (!m_useSharedStack || !m_sharedStackSlot || !m_ctxInitialized) {
+        return;
+    }
+
+    SharedStackSlot* slot = ToSharedStackSlot(m_sharedStackSlot);
+    assert(slot != nullptr && slot->stack != nullptr);
+
+    const uintptr_t stack_bottom = reinterpret_cast<uintptr_t>(slot->stack);
+    const uintptr_t stack_top = stack_bottom + slot->size;
+    const uintptr_t sp = GetContextStackPointer(m_ctx);
+
+    assert(sp >= stack_bottom && sp <= stack_top);
+    const size_t used = stack_top - sp;
+
+    m_stackSnapshot.resize(used);
+    if (used > 0) {
+        memcpy(m_stackSnapshot.data(), reinterpret_cast<void*>(sp), used);
+    }
+}
+
+void Fiber::saveCurrentSharedStackSnapshot()
+{
+    if (!m_useSharedStack || !m_sharedStackSlot) {
+        return;
+    }
+
+    SharedStackSlot* slot = ToSharedStackSlot(m_sharedStackSlot);
+    assert(slot != nullptr && slot->stack != nullptr);
+
+    const uintptr_t stack_bottom = reinterpret_cast<uintptr_t>(slot->stack);
+    const uintptr_t stack_top = stack_bottom + slot->size;
+    volatile char marker = 0;
+    const uintptr_t sp = reinterpret_cast<uintptr_t>(&marker);
+
+    assert(sp >= stack_bottom && sp <= stack_top);
+    const size_t used = stack_top - sp;
+
+    m_stackSnapshot.resize(used);
+    if (used > 0) {
+        memcpy(m_stackSnapshot.data(), reinterpret_cast<const void*>(sp), used);
+    }
+}
+
+void Fiber::restoreSharedStackSnapshot()
+{
+    if (!m_useSharedStack || !m_sharedStackSlot || m_stackSnapshot.empty()) {
+        return;
+    }
+
+    SharedStackSlot* slot = ToSharedStackSlot(m_sharedStackSlot);
+    assert(slot != nullptr && slot->stack != nullptr);
+
+    const uintptr_t stack_bottom = reinterpret_cast<uintptr_t>(slot->stack);
+    const uintptr_t stack_top = stack_bottom + slot->size;
+    const size_t used = m_stackSnapshot.size();
+
+    assert(used <= slot->size);
+    const uintptr_t restore_addr = stack_top - used;
+    memcpy(reinterpret_cast<void*>(restore_addr), m_stackSnapshot.data(), used);
+}
+
+void Fiber::prepareSharedStack()
+{
+    assert(m_useSharedStack);
+
+    const pid_t tid = Thread::GetThreadId();
+    if (m_ownerThread == -1) {
+        m_ownerThread = tid;
+    } else {
+        // 共享栈协程仅支持在绑定线程中执行
+        assert(m_ownerThread == tid);
+    }
+
+    if (m_sharedStackSlot == nullptr) {
+        SharedStackPool* pool = GetSharedStackPool(m_stacksize);
+        SharedStackSlot* slot = pool->acquireSlot();
+        assert(slot != nullptr);
+
+        m_sharedStackSlot = slot;
+        m_stack = slot->stack;
+        m_stacksize = static_cast<uint32_t>(slot->size);
+    }
+
+    SharedStackSlot* slot = ToSharedStackSlot(m_sharedStackSlot);
+    assert(slot != nullptr);
+
+    if (!m_ctxInitialized) {
+        m_stack = slot->stack;
+        m_stacksize = static_cast<uint32_t>(slot->size);
+        initFiberContext();
+    }
+
+    std::shared_ptr<Fiber> owner = slot->owner.lock();
+    if (owner && owner.get() != this) {
+        if (owner.get() == t_fiber) {
+            owner->saveCurrentSharedStackSnapshot();
+        } else {
+            owner->saveSharedStackSnapshot();
+        }
+    }
+
+    if (!owner || owner.get() != this) {
+        restoreSharedStackSnapshot();
+        slot->owner = shared_from_this();
+    }
+}
+
 /**
  * @brief 主协程构造函数（私有）
  * @details 仅由GetThis()调用，创建线程的第一个协程
@@ -89,22 +321,24 @@ Fiber::Fiber()
 {
     // 设置当前协程为自己
     SetThis(this);
-    
+
     // 主协程创建时处于运行状态
     m_state = RUNNING;
-    
+
     // 获取当前上下文
     if(getcontext(&m_ctx))
     {
         std::cerr << "Fiber() failed\n";
         pthread_exit(NULL);
     }
-    
+
+    m_ctxInitialized = true;
+
     // 分配唯一ID并增加协程计数
     m_id = s_fiber_id++;
     s_fiber_count++;
-    
-    if(debug) 
+
+    if(debug)
         std::cout << "Fiber(): main id = " << m_id << std::endl;
 }
 
@@ -115,37 +349,27 @@ Fiber::Fiber()
  * @param run_in_scheduler 是否在调度器中运行
  * @details 创建一个新的协程，分配栈空间并设置上下文
  */
-Fiber::Fiber(std::function<void()> cb, size_t stacksize, bool run_in_scheduler):
-    m_cb(cb), m_runInScheduler(run_in_scheduler)
+Fiber::Fiber(std::function<void()> cb, size_t stacksize, bool run_in_scheduler, bool use_shared_stack):
+    m_cb(std::move(cb)), m_runInScheduler(run_in_scheduler), m_useSharedStack(use_shared_stack)
 {
     // 初始状态为就绪态
     m_state = READY;
 
     // 分配协程栈空间，默认128KB
     m_stacksize = stacksize ? stacksize : 128000;
-    m_stack = malloc(m_stacksize);
 
-    // 获取当前上下文作为基础
-    if(getcontext(&m_ctx))
-    {
-        std::cerr << "Fiber(std::function<void()> cb, size_t stacksize, bool run_in_scheduler) failed\n";
-        pthread_exit(NULL);
+    if (!m_useSharedStack) {
+        m_stack = malloc(m_stacksize);
+        assert(m_stack != nullptr);
+        initFiberContext();
     }
-    
-    // 设置上下文属性
-    m_ctx.uc_link = nullptr;       // 协程结束时不自动切换到其他协程
-    m_ctx.uc_stack.ss_sp = m_stack; // 设置栈指针
-    m_ctx.uc_stack.ss_size = m_stacksize; // 设置栈大小
-    
-    // 创建协程上下文，设置入口函数为MainFunc
-    makecontext(&m_ctx, &Fiber::MainFunc, 0);
-    
+
     // 分配唯一ID并增加协程计数
     m_id = s_fiber_id++;
     s_fiber_count++;
-    
-    if(debug) 
-        std::cout << "Fiber(): child id = " << m_id << std::endl;
+
+    if(debug)
+        std::cout << "Fiber(): child id = " << m_id << (m_useSharedStack ? " (shared stack)" : "") << std::endl;
 }
 
 /**
@@ -155,13 +379,12 @@ Fiber::Fiber(std::function<void()> cb, size_t stacksize, bool run_in_scheduler):
 Fiber::~Fiber()
 {
     s_fiber_count--;
-    // 如果有分配栈空间则释放
-    if(m_stack)
-    {
+
+    if (!m_useSharedStack && m_stack) {
         free(m_stack);
     }
-    
-    if(debug) 
+
+    if(debug)
         std::cout << "~Fiber(): id = " << m_id << std::endl;
 }
 
@@ -174,24 +397,29 @@ Fiber::~Fiber()
 void Fiber::reset(std::function<void()> cb)
 {
     // 只有已终止的协程才能重置
-    assert(m_stack != nullptr && m_state == TERM);
+    assert(m_state == TERM);
 
     // 重置协程状态为就绪
     m_state = READY;
-    m_cb = cb;
+    m_cb = std::move(cb);
+    m_stackSnapshot.clear();
+    m_parent = nullptr;
+    m_returnToParent = false;
 
-    // 重新获取上下文
-    if(getcontext(&m_ctx))
-    {
-        std::cerr << "reset() failed\n";
-        pthread_exit(NULL);
+    if (!m_useSharedStack) {
+        assert(m_stack != nullptr);
+        initFiberContext();
+        return;
     }
 
-    // 重新设置上下文属性
-    m_ctx.uc_link = nullptr;
-    m_ctx.uc_stack.ss_sp = m_stack;
-    m_ctx.uc_stack.ss_size = m_stacksize;
-    makecontext(&m_ctx, &Fiber::MainFunc, 0);
+    SharedStackSlot* slot = ToSharedStackSlot(m_sharedStackSlot);
+    if (slot) {
+        m_stack = slot->stack;
+        m_stacksize = static_cast<uint32_t>(slot->size);
+        initFiberContext();
+    } else {
+        m_ctxInitialized = false;
+    }
 }
 
 /**
@@ -203,7 +431,11 @@ void Fiber::resume()
 {
     // 确保协程处于就绪状态
     assert(m_state == READY);
-    
+
+    if (m_useSharedStack) {
+        prepareSharedStack();
+    }
+
     // 将协程状态设置为运行中
     m_state = RUNNING;
 
@@ -230,6 +462,41 @@ void Fiber::resume()
 }
 
 /**
+ * @brief 在当前协程上下文内同步调用该协程
+ * @details 当前协程作为父协程，目标协程作为子协程执行；子协程yield或结束后返回父协程
+ */
+void Fiber::call()
+{
+    assert(m_state == READY);
+
+    std::shared_ptr<Fiber> parent_holder = Fiber::GetThis();
+    Fiber* parent = parent_holder.get();
+    assert(parent != nullptr);
+    assert(parent != this);
+    // TODO(lihao): 嵌套与共享栈的深度融合需单独处理父协程运行时快照时机。
+    assert(!(m_useSharedStack && parent->m_useSharedStack) &&
+           "nested call with both parent/child shared stacks is not supported yet");
+
+    if (m_useSharedStack) {
+        prepareSharedStack();
+    }
+
+    m_parent = parent;
+    m_returnToParent = true;
+    m_state = RUNNING;
+
+    SetThis(this);
+    if (swapcontext(&(parent->m_ctx), &m_ctx)) {
+        std::cerr << "call() switch to child failed\n";
+        pthread_exit(NULL);
+    }
+
+    // 回到父协程后，清理本次调用关系，避免悬挂父指针
+    m_parent = nullptr;
+    m_returnToParent = false;
+}
+
+/**
  * @brief 协程让出执行权
  * @details 暂停当前协程的执行，将控制权交回调用者
  *          可以是运行中的协程主动让出，也可以是已完成的协程自动让出
@@ -243,6 +510,12 @@ void Fiber::yield()
     if(m_state != TERM)
     {
         m_state = READY;
+    }
+
+    // 协程嵌套：优先返回父协程
+    if (m_returnToParent && m_parent != nullptr) {
+        back();
+        return;
     }
 
     if(m_runInScheduler)
@@ -264,6 +537,24 @@ void Fiber::yield()
             std::cerr << "yield() to t_thread_fiber failed\n";
             pthread_exit(NULL);
         }
+    }
+}
+
+void Fiber::back()
+{
+    assert(m_parent != nullptr);
+
+    Fiber* parent = m_parent;
+
+    // 共享栈嵌套切换：切回父协程前先恢复父协程栈快照
+    if (parent->m_useSharedStack) {
+        parent->prepareSharedStack();
+    }
+
+    SetThis(parent);
+    if (swapcontext(&m_ctx, &(parent->m_ctx))) {
+        std::cerr << "back() switch to parent failed\n";
+        pthread_exit(NULL);
     }
 }
 
@@ -291,19 +582,19 @@ void Fiber::MainFunc()
     {
         std::cerr << "Fiber::MainFunc caught unknown exception" << std::endl;
     }
-    
+
     // 执行完成后清除回调函数，避免循环引用
     curr->m_cb = nullptr;
-    
+
     // 设置协程状态为已终止
     curr->m_state = TERM;
 
     // 保存裸指针，因为接下来要重置智能指针
     auto raw_ptr = curr.get();
-    
+
     // 释放智能指针引用，减少引用计数
     curr.reset();
-    
+
     // 让出执行权，返回到调用者协程
     raw_ptr->yield();
 

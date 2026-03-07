@@ -3,13 +3,49 @@
 
 #include <mycoroutine/hook.h>
 #include <mycoroutine/fiber.h>    // 包含协程相关头文件
+#include <mycoroutine/coroutine_pool.h> // 协程池
 #include <mycoroutine/thread.h>   // 包含线程相关头文件
 
 #include <mutex>      // 互斥锁头文件
 #include <vector>     // 向量容器头文件
 #include <string>     // 字符串头文件
+#include <utility>    // std::move
+#include <cstdint>    // uint64_t
 
 namespace mycoroutine {  // mycoroutine命名空间
+
+/**
+ * @brief 调度策略
+ */
+enum class SchedulePolicy
+{
+    FIFO = 0,    ///< 先进先出
+    PRIORITY,    ///< 优先级高优先
+    MLFQ,        ///< 多级反馈队列
+    EDF,         ///< Earliest Deadline First
+    HYBRID       ///< 截止期优先 + 优先级回退
+};
+
+/**
+ * @brief 任务调度参数
+ */
+struct ScheduleOptions
+{
+    int thread = -1;               ///< 指定线程，-1表示任意线程
+    int priority = 0;              ///< 优先级，越大越先执行
+    uint64_t deadline_ms = 0;      ///< 截止时间戳（毫秒），0表示无截止期
+};
+
+/**
+ * @brief MLFQ 参数配置
+ */
+struct MLFQConfig
+{
+    uint8_t levels = 3;            ///< 队列层数，最小为1，0层为最高优先级
+    bool demote_on_yield = true;   ///< 任务yield后是否降级
+    bool enable_aging = true;      ///< 是否启用aging防饥饿
+    uint64_t aging_sequence_gap = 64; ///< 触发一次提升所需的序列差
+};
 
 /**
  * @brief 协程调度器类
@@ -17,6 +53,9 @@ namespace mycoroutine {  // mycoroutine命名空间
  */
 class Scheduler
 {
+private:
+    struct ScheduleTask;
+
 public:
     /**
      * @brief 构造函数
@@ -44,6 +83,38 @@ public:
      */
     static Scheduler* GetThis();
 
+    /**
+     * @brief 设置调度策略
+     */
+    void setPolicy(SchedulePolicy policy);
+
+    /**
+     * @brief 获取当前调度策略
+     */
+    SchedulePolicy getPolicy();
+
+    /**
+     * @brief 配置MLFQ参数
+     */
+    void setMLFQConfig(const MLFQConfig& config);
+
+    /**
+     * @brief 获取当前MLFQ参数
+     */
+    MLFQConfig getMLFQConfig();
+
+    /**
+     * @brief 设置协程池每个key的最大缓存容量
+     */
+    void setCoroutinePoolMaxCachedPerKey(size_t max_cached_per_key);
+
+    /**
+     * @brief 查询协程池缓存数量
+     */
+    size_t getCoroutinePoolCachedCount(size_t stacksize = 0,
+                                       bool run_in_scheduler = true,
+                                       bool use_shared_stack = false);
+
 protected:
     /**
      * @brief 设置正在运行的调度器
@@ -53,6 +124,15 @@ protected:
     
 public:    
     /**
+     * @brief 添加任务到任务队列（线程安全，支持优先级/截止时间）
+     * @tparam FiberOrCb 任务类型，可以是协程指针或回调函数
+     * @param fc 任务对象
+     * @param options 调度选项
+     */
+    template <class FiberOrCb>
+    void scheduleEx(FiberOrCb fc, const ScheduleOptions& options = ScheduleOptions());
+
+    /**
      * @brief 添加任务到任务队列（线程安全）
      * @tparam FiberOrCb 任务类型，可以是协程指针或回调函数
      * @param fc 任务对象
@@ -61,26 +141,23 @@ public:
     template <class FiberOrCb>
     void scheduleLock(FiberOrCb fc, int thread = -1) 
     {
-        bool need_tickle;
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            // 如果任务队列为空，说明所有线程都处于空闲状态，需要唤醒它们
-            need_tickle = m_tasks.empty();
-            
-            // 创建任务对象
-            ScheduleTask task(fc, thread);
-            if (task.fiber || task.cb) 
-            {
-                // 将任务添加到队列
-                m_tasks.push_back(task);
-            }
-        }
-        
-        // 如果需要唤醒线程
-        if(need_tickle)
-        {
-            tickle();
-        }
+        ScheduleOptions options;
+        options.thread = thread;
+        scheduleEx(fc, options);
+    }
+
+    /**
+     * @brief 以共享栈协程方式调度一个回调任务
+     * @param cb 任务回调
+     * @param stacksize 协程栈大小，0表示默认值
+     * @param thread 指定执行线程，-1表示任意线程
+     */
+    void scheduleShared(std::function<void()> cb, size_t stacksize = 0, int thread = -1)
+    {
+        auto fiber = std::make_shared<Fiber>(std::move(cb), stacksize, true, true);
+        ScheduleOptions options;
+        options.thread = thread;
+        scheduleEx(fiber, options);
     }
     
     /**
@@ -126,6 +203,8 @@ protected:
      */
     bool hasIdleThreads() {return m_idleThreadCount>0;}
 
+    bool pickNextTaskLocked(int thread_id, ScheduleTask& out_task, bool& tickle_me);
+
 private:
     /**
      * @brief 任务结构体
@@ -136,6 +215,10 @@ private:
         std::shared_ptr<Fiber> fiber;  // 协程指针
         std::function<void()> cb;      // 回调函数
         int thread;                    // 指定任务需要运行的线程id
+        int priority = 0;              // 调度优先级
+        uint8_t mlfq_level = 0;        // MLFQ队列层级（0最高）
+        uint64_t deadline_ms = 0;      // 截止期（0表示无）
+        uint64_t sequence = 0;         // 入队序号（稳定排序）
 
         /**
          * @brief 默认构造函数
@@ -209,6 +292,10 @@ private:
     std::mutex m_mutex;                  // 互斥锁，保护任务队列
     std::vector<std::shared_ptr<Thread>> m_threads;  // 线程池
     std::vector<ScheduleTask> m_tasks;   // 任务队列
+    CoroutinePool m_coroutinePool;       // 协程池（复用回调包装协程）
+    SchedulePolicy m_policy = SchedulePolicy::FIFO; // 当前调度策略
+    MLFQConfig m_mlfqConfig;             // MLFQ运行参数
+    uint64_t m_taskSequence = 0;         // 任务序列号生成器
     std::vector<int> m_threadIds;        // 工作线程的线程ID列表
     size_t m_threadCount = 0;            // 需要额外创建的线程数
     std::atomic<size_t> m_activeThreadCount = {0};  // 活跃线程数
@@ -219,5 +306,30 @@ private:
 };
 
 } // end namespace mycoroutine
+
+template <class FiberOrCb>
+void mycoroutine::Scheduler::scheduleEx(FiberOrCb fc, const ScheduleOptions& options)
+{
+    bool need_tickle = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        need_tickle = m_tasks.empty();
+
+        ScheduleTask task(fc, options.thread);
+        if (task.fiber || task.cb)
+        {
+            task.priority = options.priority;
+            task.mlfq_level = 0;
+            task.deadline_ms = options.deadline_ms;
+            task.sequence = m_taskSequence++;
+            m_tasks.push_back(task);
+        }
+    }
+
+    if (need_tickle)
+    {
+        tickle();
+    }
+}
 
 #endif
