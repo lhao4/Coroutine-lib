@@ -5,8 +5,8 @@
 
 ## 1. 测试目标
 - 验证共享栈协程在频繁切换下的数据一致性。
-- 验证协程嵌套 `call/back` 的返回链路正确。
-- 验证复杂调度策略的执行顺序符合预期。
+- 验证协程嵌套 `call/back` 返回链路与错误码语义正确。
+- 验证复杂调度策略执行顺序符合预期。
 - 验证协程池对象复用、容量限制和 key 隔离。
 
 ## 2. 测试目标与文件映射
@@ -15,7 +15,7 @@
 |---|---|---|
 | `mycoroutine_smoke_test` | `tests/smoke/main.cpp` | 基础调度能力 |
 | `mycoroutine_shared_stack_test` | `tests/shared_stack/main.cpp` | 单槽位复用下栈快照正确 |
-| `mycoroutine_nested_test` | `tests/nested/main.cpp` | 父子协程嵌套调用与多层返回 |
+| `mycoroutine_nested_test` | `tests/nested/main.cpp` | 嵌套链路 + `call()` 错误码 |
 | `mycoroutine_policy_test` | `tests/policy/main.cpp` | PRIORITY/EDF/HYBRID/MLFQ 顺序与配置归一化 |
 | `mycoroutine_pool_test` | `tests/pool/main.cpp` | 协程池复用、上限、key 隔离 |
 
@@ -27,15 +27,15 @@
   - `Fiber::SetSharedStackSlotCount(1)` 强制单槽位。
   - 创建多个共享栈 Fiber，循环 `yield/resume`。
   - 在局部数组写入 pattern，恢复后逐字节断言。
-- 通过标准：所有 Fiber 结束且所有断言通过。
+- 通过标准：所有 Fiber 结束且断言通过。
 
 ### 3.2 协程嵌套测试
 - 执行方式：`mycoroutine_nested_test`
 - 方法：
   - 用 `trace` 验证 `parent->child->parent` 顺序。
-  - 验证两层嵌套 `root->mid->grand` 的顺序收敛。
-  - 检查 `parent()` 非空以及最终状态 `TERM`。
-- 通过标准：trace 全量匹配预期向量。
+  - 验证两层嵌套 `root->mid->grand` 顺序收敛。
+  - 新增失败路径：父子协程同时共享栈时，`call()` 返回 `CALL_ERR_SHARED_NESTED_UNSUPPORTED`。
+- 通过标准：trace 匹配预期向量，错误码匹配预期值。
 
 ### 3.3 调度策略测试
 - 执行方式：`mycoroutine_policy_test`
@@ -53,7 +53,7 @@
   - 复用命中：释放后再次获取对象地址一致。
   - 上限控制：`max_cached_per_key=1` 时缓存不超过 1。
   - key 隔离：`use_shared_stack=false/true` 缓存桶独立。
-- 通过标准：缓存计数、地址复用与状态断言全部通过。
+- 通过标准：缓存计数、地址复用与状态断言通过。
 
 ## 4. 功能验证命令
 
@@ -77,6 +77,6 @@ ctest --test-dir build/debug -R mycoroutine_pool_test --output-on-failure
 | 优化点 | 测试方法 | 验收标准 |
 |---|---|---|
 | 共享栈复用 | 单槽位多协程交替切换 + 栈数组校验 | 无数据污染，全部协程结束 |
-| 嵌套协程切换 | 单层/双层 `call()` 链路与 trace 校验 | 顺序正确、状态正确 |
+| 嵌套协程切换 | 单层/双层 `call()` 链路与错误码校验 | 顺序正确、错误码正确 |
 | 调度策略 | PRIORITY/EDF/HYBRID/MLFQ 执行顺序断言 | 顺序与策略定义一致 |
 | 协程池申请/回收 | 命中复用、容量限制、桶隔离断言 | 命中正确、缓存受控、无混桶 |

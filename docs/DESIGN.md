@@ -66,10 +66,17 @@ static size_t GetSharedStackSlotCount();
 ### 3.1 新增接口
 
 ```cpp
-void call();
+int call();
 void back();
 Fiber* parent() const;
 ```
+
+`call()` 返回码：
+- `Fiber::CALL_OK`
+- `Fiber::CALL_ERR_NOT_READY`
+- `Fiber::CALL_ERR_NO_CURRENT_FIBER`
+- `Fiber::CALL_ERR_SELF_CALL`
+- `Fiber::CALL_ERR_SHARED_NESTED_UNSUPPORTED`
 
 ### 3.2 状态字段
 - `Fiber* m_parent`
@@ -86,7 +93,7 @@ Fiber* parent() const;
 - `reset()` 会清理父子关系字段，保证对象复用安全。
 
 ### 3.4 当前边界
-- `call()` 中包含断言：父子协程同时使用共享栈的嵌套路径暂未开放。
+- 父子协程同时使用共享栈的嵌套路径暂未开放，`call()` 返回 `CALL_ERR_SHARED_NESTED_UNSUPPORTED`。
 
 ## 4. 调度器与复杂调度算法
 
@@ -232,8 +239,8 @@ int main() {
         Fiber::GetThis()->yield();
     }, 0, false, false);
 
-    child->call();
-    child->call();
+    if (child->call() != Fiber::CALL_OK) return 1;
+    if (child->call() != Fiber::CALL_OK) return 1;
     return 0;
 }
 ```

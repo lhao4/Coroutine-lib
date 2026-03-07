@@ -32,6 +32,7 @@
 - 新增 `Fiber::call()`、`Fiber::back()`、`Fiber::parent()`。
 - `yield()` 加入优先返回父协程路径。
 - `reset()` 清理父子关系状态。
+- `call()` 升级为错误码返回，发布版可生效。
 
 ### 3.2 关键文件
 - `include/mycoroutine/fiber.h`
@@ -91,4 +92,4 @@ ctest --preset debug --output-on-failure
 结果：`5/5` 测试通过。
 
 ## 8. 当前实现边界
-- `call()` 路径中，父子协程同时使用共享栈的组合由断言保护。
+- `call()` 路径中，父子协程同时使用共享栈时返回 `CALL_ERR_SHARED_NESTED_UNSUPPORTED`。

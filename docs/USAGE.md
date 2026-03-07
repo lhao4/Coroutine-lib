@@ -60,8 +60,8 @@ int main() {
         Fiber::GetThis()->yield();
     }, 0, false, false);
 
-    child->call();  // 第一次进入，子协程 yield 回父协程
-    child->call();  // 第二次进入，子协程执行到 TERM
+    if (child->call() != Fiber::CALL_OK) return 1;  // 第一次进入，子协程 yield 回父协程
+    if (child->call() != Fiber::CALL_OK) return 1;  // 第二次进入，子协程执行到 TERM
     return 0;
 }
 ```
@@ -115,6 +115,7 @@ int main() {
 - `Fiber(cb, stacksize, run_in_scheduler, use_shared_stack)`
 - `resume()` / `yield()`
 - `call()` / `back()` / `parent()`
+  - `call()` 返回错误码：`CALL_OK` 为成功，非 0 为失败。
 - `SetSharedStackSlotCount()` / `GetSharedStackSlotCount()`
 
 ### 4.2 Scheduler API

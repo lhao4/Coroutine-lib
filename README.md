@@ -4,19 +4,19 @@
 当前版本已完成四项核心升级：共享栈、协程嵌套、复杂调度策略、协程池。
 
 ## 项目简介
-`mycoroutine` 面向系统编程学习与轻量运行时实践，提供从协程创建、切换、调度到 IO 挂起恢复的完整链路。
+`mycoroutine` 提供从协程创建、切换、调度到 IO 挂起恢复的完整链路，代码规模可控，适合系统编程学习与运行时实现实践。
 
 ## 项目目标
 - 提供可运行、可扩展的协程运行时基础库。
-- 支持网络 IO 与定时器任务的协程化调度。
-- 在小规模代码体量下完成可验证的关键优化能力。
+- 支持网络 IO 与定时器任务协程化调度。
+- 在小规模代码体量下落地可验证的运行时优化能力。
 
 ## 项目特点
 - 有栈协程（stackful），支持显式 `yield/resume`。
+- 协程嵌套支持 `call/back`，`call()` 使用错误码返回。
 - 调度器支持 `FIFO / PRIORITY / MLFQ / EDF / HYBRID`。
-- 共享栈模式支持按线程配置槽位并做栈快照恢复。
-- 协程嵌套支持 `call/back` 父子协程切换。
-- 协程池复用 `TERM` 协程对象，降低频繁创建销毁开销。
+- 共享栈支持按线程配置槽位并执行快照保存/恢复。
+- 协程池支持 `TERM` 协程复用，降低频繁创建销毁开销。
 
 ## 目录结构概览
 
@@ -50,15 +50,18 @@
 │   ├── policy/main.cpp
 │   └── pool/main.cpp
 └── docs/
+    ├── ARCHITECTURE.md
     ├── DESIGN.md
     ├── MODULES.md
     ├── USAGE.md
     ├── TEST.md
+    ├── TEST_REPORT.md
     ├── IMPROVEMENTS.md
+    ├── KNOWN_LIMITATIONS.md
     └── UPGRADE_LOG.md
 ```
 
-## 快速编译和运行方式
+## 快速编译和运行
 
 ### 1) Debug 构建 + 测试
 ```bash
@@ -99,9 +102,12 @@ int main() {
 ```
 
 ## 文档导航
-- `docs/DESIGN.md`：核心设计与优化实现。
-- `docs/MODULES.md`：模块职责、接口和调用关系。
-- `docs/USAGE.md`：编译、运行、API 示例。
+- `docs/ARCHITECTURE.md`：运行时架构与模块关系。
+- `docs/DESIGN.md`：四项升级的实现设计。
+- `docs/MODULES.md`：模块职责、接口、调用关系。
+- `docs/USAGE.md`：构建、运行与 API 示例。
 - `docs/TEST.md`：测试用例与验证方法。
-- `docs/IMPROVEMENTS.md`：优化结果与使用注意事项。
-- `docs/UPGRADE_LOG.md`：本轮升级变更记录。
+- `docs/TEST_REPORT.md`：最近一轮测试结论。
+- `docs/IMPROVEMENTS.md`：优化结果与运行代价。
+- `docs/KNOWN_LIMITATIONS.md`：当前版本边界。
+- `docs/UPGRADE_LOG.md`：升级变更记录。

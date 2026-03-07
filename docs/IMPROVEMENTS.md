@@ -33,7 +33,7 @@
 
 ### 2.2 协程嵌套
 - `call()` 要求子协程处于 `READY`。
-- 父子协程同时启用共享栈的嵌套路径当前由断言保护。
+- 父子协程同时启用共享栈的嵌套路径会返回 `CALL_ERR_SHARED_NESTED_UNSUPPORTED`。
 
 ### 2.3 调度策略
 - `scheduleLock()` 仍可用，等价于默认 `ScheduleOptions` 入队。
