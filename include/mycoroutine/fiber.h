@@ -32,6 +32,18 @@ public:
         TERM    // 终止态：协程执行完毕
     };
 
+    /**
+     * @brief call() 返回码
+     */
+    enum CallCode
+    {
+        CALL_OK = 0,                               ///< 调用成功
+        CALL_ERR_NOT_READY = 1,                    ///< 目标协程不在READY状态
+        CALL_ERR_NO_CURRENT_FIBER = 2,             ///< 当前线程无活动协程
+        CALL_ERR_SELF_CALL = 3,                    ///< 禁止自调用
+        CALL_ERR_SHARED_NESTED_UNSUPPORTED = 4     ///< 父子协程同时共享栈的嵌套调用未支持
+    };
+
 private:
     /**
      * @brief 私有构造函数，仅用于创建主协程
@@ -76,8 +88,9 @@ public:
      * @brief 在当前协程上下文内同步调用该协程
      * @details 用于协程嵌套：当前协程作为父协程，目标协程作为子协程执行，
      *          子协程yield/结束后返回父协程。
+     * @return CallCode 错误码，0表示成功
      */
-    void call();
+    int call();
     
     /**
      * @brief 协程让出执行权

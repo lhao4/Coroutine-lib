@@ -465,17 +465,24 @@ void Fiber::resume()
  * @brief 在当前协程上下文内同步调用该协程
  * @details 当前协程作为父协程，目标协程作为子协程执行；子协程yield或结束后返回父协程
  */
-void Fiber::call()
+int Fiber::call()
 {
-    assert(m_state == READY);
+    if (m_state != READY) {
+        return CALL_ERR_NOT_READY;
+    }
 
     std::shared_ptr<Fiber> parent_holder = Fiber::GetThis();
     Fiber* parent = parent_holder.get();
-    assert(parent != nullptr);
-    assert(parent != this);
+    if (parent == nullptr) {
+        return CALL_ERR_NO_CURRENT_FIBER;
+    }
+    if (parent == this) {
+        return CALL_ERR_SELF_CALL;
+    }
     // TODO(lihao): 嵌套与共享栈的深度融合需单独处理父协程运行时快照时机。
-    assert(!(m_useSharedStack && parent->m_useSharedStack) &&
-           "nested call with both parent/child shared stacks is not supported yet");
+    if (m_useSharedStack && parent->m_useSharedStack) {
+        return CALL_ERR_SHARED_NESTED_UNSUPPORTED;
+    }
 
     if (m_useSharedStack) {
         prepareSharedStack();
@@ -494,6 +501,7 @@ void Fiber::call()
     // 回到父协程后，清理本次调用关系，避免悬挂父指针
     m_parent = nullptr;
     m_returnToParent = false;
+    return CALL_OK;
 }
 
 /**
