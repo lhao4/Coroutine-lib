@@ -1,188 +1,239 @@
 # DESIGN
 
-## 文档目的
+## 文档用途
+说明当前版本四项升级能力的实现方案与关键实现点：共享栈、协程嵌套、复杂调度算法、协程池。
 
-本文档聚焦“为什么这样设计”和“当前代码是怎么实现的”，覆盖协程实现方式、调度机制、状态机、切换流程、退出与资源回收。
+## 1. 设计基线
 
----
+### 1.1 运行时主链路
+- 协程执行单元：`Fiber`
+- 任务调度器：`Scheduler`
+- IO 事件调度：`IOManager`（继承 `Scheduler`）
+- 复用组件：`CoroutinePool`
 
-## 1. 设计目标
+### 1.2 本轮升级目标
+- 共享栈：降低大量协程时的栈内存占用。
+- 协程嵌套：支持父协程同步调用子协程。
+- 复杂调度：支持优先级、多级反馈、截止期等策略。
+- 协程池：复用终止协程对象，减少创建销毁开销。
 
-当前实现的设计目标非常明确：
+## 2. 共享栈设计与实现
 
-1. 实现可运行的协程运行时最小闭环
-2. 保持系统编程特性（线程、fd、epoll、超时）
-3. 代码规模可控，便于理解与调试
+### 2.1 入口接口
+`Fiber` 新构造参数：
 
-因此它优先选择“实现透明、路径完整”，而不是“接口复杂度最低”或“极致性能”。
-
----
-
-## 2. 协程实现方式
-
-## 2.1 模型选择
-
-- 类型：**有栈协程（stackful coroutine）**
-- 上下文机制：`ucontext`（`getcontext/makecontext/swapcontext`）
-- 实现位置：`fiber.h` / `fiber.cpp`
-
-## 2.2 为什么采用该方式
-
-- 可直接在任意调用栈深度 `yield`，恢复时继续原栈帧
-- 与 `Scheduler`、Hook IO 结合路径清晰
-- 学习成本较低，适合教学和小型项目
-
-主要代价：
-- 依赖 `ucontext`，可移植性一般
-- 每个协程独立栈（默认 128KB）带来内存成本
-
----
-
-## 3. 调度器设计思想
-
-## 3.1 调度模型
-
-`Scheduler` 维护任务队列 `m_tasks`，任务单元为 `ScheduleTask`：
-- `fiber`（协程任务）
-- `cb`（回调任务）
-- `thread`（线程亲和 id，`-1` 表示任意线程）
-
-worker 线程在 `run()` 循环中：
-- 取一个可执行任务
-- 执行协程或将回调包装为临时协程执行
-- 无任务则运行 `idle_fiber`
-
-## 3.2 `use_caller` 设计
-
-- `use_caller=true`：调用者线程也参与调度
-- 构造时创建 `m_schedulerFiber`，由主线程驱动调度循环
-
-该设计减少了“必须额外开线程”的门槛，也能覆盖“主线程参与调度”的常见模式。
-
----
-
-## 4. 协程生命周期与状态管理
-
-`Fiber::State` 只有三个状态：
-
-- `READY`：就绪，可被调度
-- `RUNNING`：执行中
-- `TERM`：执行结束
-
-状态迁移规则：
-- 新建协程：`READY`
-- `resume()`：`READY -> RUNNING`
-- `yield()`（未结束）：`RUNNING -> READY`
-- `MainFunc` 执行完成：`RUNNING -> TERM`
-
----
-
-## 5. 协程生命周期图（Mermaid）
-
-```mermaid
-stateDiagram-v2
-    [*] --> READY: Fiber(cb)
-    READY --> RUNNING: resume()
-    RUNNING --> READY: yield() / not finished
-    RUNNING --> TERM: cb return or exception
-    TERM --> READY: reset(cb)
-    TERM --> [*]
+```cpp
+Fiber(std::function<void()> cb,
+      size_t stacksize = 0,
+      bool run_in_scheduler = true,
+      bool use_shared_stack = false);
 ```
 
-说明：
-- `reset(cb)` 只能作用于 `TERM` 协程。
-- 入口函数 `MainFunc` 内部会捕获异常，保证状态可收敛到 `TERM`。
+`Fiber` 共享栈配置接口：
 
----
-
-## 6. 协程切换设计
-
-当前线程有三类 TLS 指针：
-
-- `t_thread_fiber`：线程主协程
-- `t_scheduler_fiber`：调度协程
-- `t_fiber`：当前执行协程
-
-`Fiber::resume()` 和 `yield()` 的切换目标由 `m_runInScheduler` 决定：
-- `true`：协程与调度协程互切
-- `false`：协程与线程主协程互切
-
----
-
-## 7. 协程切换流程图（Mermaid）
-
-```mermaid
-flowchart TD
-    A[Scheduler picks READY fiber] --> B[Fiber::resume]
-    B --> C[SetThis(this)]
-    C --> D{run_in_scheduler?}
-    D -- yes --> E[swapcontext scheduler_ctx -> fiber_ctx]
-    D -- no --> F[swapcontext thread_main_ctx -> fiber_ctx]
-
-    E --> G[Fiber executes cb]
-    F --> G
-
-    G --> H[Fiber::yield]
-    H --> I{state TERM?}
-    I -- no --> J[state = READY]
-    I -- yes --> K[state = TERM]
-
-    J --> L[swapcontext fiber_ctx -> scheduler/thread_ctx]
-    K --> L
+```cpp
+static void SetSharedStackSlotCount(size_t slot_count);
+static size_t GetSharedStackSlotCount();
 ```
 
----
+### 2.2 内部结构（`src/fiber.cpp`）
+- `SharedStackSlot`
+  - `char* stack`
+  - `size_t size`
+  - `std::weak_ptr<Fiber> owner`
+- `SharedStackPool`
+  - 固定槽位数组
+  - 轮转分配 `acquireSlot()`
+- 线程局部池
+  - `thread_local std::unordered_map<size_t, std::unique_ptr<SharedStackPool>> t_shared_stack_pools`
+  - 按栈大小分桶
 
-## 8. 调度器工作流程图（Mermaid）
+### 2.3 切换关键路径
+- `Fiber::resume()`
+  - 共享栈协程先调用 `prepareSharedStack()`。
+  - 如果目标槽位已被其他协程占用，先保存旧 owner 的活动栈快照。
+  - 恢复当前协程快照到共享栈后再 `swapcontext`。
+- `prepareSharedStack()`
+  - 绑定执行线程（共享栈协程仅允许在首次绑定线程运行）。
+  - 初始化上下文（延迟到首次拿到槽位时）。
+- 快照函数
+  - `saveSharedStackSnapshot()`：从上下文 SP 保存。
+  - `saveCurrentSharedStackSnapshot()`：从当前栈标记位置保存。
+  - `restoreSharedStackSnapshot()`：切入前恢复。
 
-```mermaid
-flowchart TD
-    START[Scheduler::run] --> HOOK[set_hook_enable(true)]
-    HOOK --> LOOP{while true}
+## 3. 协程嵌套支持逻辑
 
-    LOOP --> PICK[scan m_tasks]
-    PICK --> HAS_TASK{task found?}
+### 3.1 新增接口
 
-    HAS_TASK -- yes --> EXEC{fiber or cb}
-    EXEC -- fiber --> R1[fiber->resume]
-    EXEC -- cb --> R2[make Fiber(cb) and resume]
-    R1 --> LOOP
-    R2 --> LOOP
-
-    HAS_TASK -- no --> IDLE[idle_fiber->resume]
-    IDLE --> TERMCHK{idle fiber TERM?}
-    TERMCHK -- no --> LOOP
-    TERMCHK -- yes --> END[exit run]
+```cpp
+void call();
+void back();
+Fiber* parent() const;
 ```
 
----
+### 3.2 状态字段
+- `Fiber* m_parent`
+- `bool m_returnToParent`
 
-## 9. 协程退出与资源回收机制
+### 3.3 执行语义
+- 父协程执行 `child->call()`：
+  - `child.m_parent = parent`
+  - `child.m_returnToParent = true`
+  - `swapcontext(parent, child)`
+- 子协程执行 `yield()`：
+  - 若存在父协程并且 `m_returnToParent=true`，优先走 `back()` 返回父协程。
+  - 否则按原路径回到调度协程或主协程。
+- `reset()` 会清理父子关系字段，保证对象复用安全。
 
-协程入口 `Fiber::MainFunc()` 执行流程：
+### 3.4 当前边界
+- `call()` 中包含断言：父子协程同时使用共享栈的嵌套路径暂未开放。
 
-1. 获取当前协程智能指针，保证执行期间对象存活
-2. 执行 `m_cb`（带异常捕获）
-3. 清空 `m_cb`，状态置为 `TERM`
-4. 释放当前 `shared_ptr`，保留裸指针
-5. 调用 `yield()` 把控制权交回调度侧
+## 4. 调度器与复杂调度算法
 
-资源回收：
-- 协程对象析构时释放栈内存 `free(m_stack)`
-- 非主协程都持有独立栈
+### 4.1 调度策略
 
----
+```cpp
+enum class SchedulePolicy {
+    FIFO,
+    PRIORITY,
+    MLFQ,
+    EDF,
+    HYBRID
+};
+```
 
-## 10. 错误处理与边界处理
+### 4.2 调度参数
 
-当前实现采用“`assert + errno + 错误返回`”混合策略：
+```cpp
+struct ScheduleOptions {
+    int thread = -1;
+    int priority = 0;
+    uint64_t deadline_ms = 0;
+};
+```
 
-- 结构性不变量（状态非法、空指针不应出现）用 `assert`
-- 系统调用失败使用返回值/`errno`
-- Hook IO 中处理 `EINTR`、`EAGAIN`、超时（`ETIMEDOUT`）
+### 4.3 MLFQ 参数
 
-边界行为：
-- `do_io` 若不在 `IOManager` 线程中，回退到原始系统调用路径
-- `addEvent` 对非法 `fd` 直接失败
-- 事件取消接口统一返回 `bool` 语义
+```cpp
+struct MLFQConfig {
+    uint8_t levels = 3;
+    bool demote_on_yield = true;
+    bool enable_aging = true;
+    uint64_t aging_sequence_gap = 64;
+};
+```
 
+### 4.4 调度实现点（`src/scheduler.cpp`）
+- 入队接口
+  - `scheduleEx(fc, options)`
+  - 兼容接口 `scheduleLock(fc, thread)`
+- 核心选取函数
+  - `pickNextTaskLocked(int thread_id, ScheduleTask&, bool& tickle_me)`
+- 选取规则
+  - `FIFO`：首个匹配线程任务。
+  - `PRIORITY`：`priority` 高优先，`sequence` 保序。
+  - `MLFQ`：按 `mlfq_level` 选取，支持 aging 提升。
+  - `EDF`：有截止期任务优先，截止期更早优先。
+  - `HYBRID`：先截止期，再优先级。
+- MLFQ 回灌
+  - Fiber 运行后若仍 `READY`，根据 `demote_on_yield` 降级后重新入队。
+- 配置归一化
+  - `levels == 0 -> 1`
+  - `aging_sequence_gap == 0 -> 1`
+
+## 5. 协程池设计与实现
+
+### 5.1 核心接口
+
+```cpp
+std::shared_ptr<Fiber> acquire(std::function<void()> cb,
+                               size_t stacksize = 0,
+                               bool run_in_scheduler = true,
+                               bool use_shared_stack = false);
+
+void release(std::shared_ptr<Fiber>& fiber,
+             size_t stacksize = 0,
+             bool run_in_scheduler = true,
+             bool use_shared_stack = false);
+```
+
+### 5.2 关键实现（`src/coroutine_pool.cpp`）
+- 分桶 key：`stacksize + run_in_scheduler + use_shared_stack`
+- `acquire`：
+  - 命中缓存 -> `fiber->reset(cb)`
+  - 未命中 -> 新建 `Fiber`
+- `release`：
+  - 仅回收 `TERM` 状态
+  - 按桶容量 `m_maxCachedPerKey` 限流
+
+### 5.3 调度器接入
+- `Scheduler::run()` 执行 `task.cb` 时：
+  - 通过 `m_coroutinePool.acquire(...)` 获取协程
+  - 执行结束后 `TERM` 则 `release(...)`
+
+## 6. 核心函数与数据结构清单
+
+### 6.1 Fiber
+- `resume()` / `yield()`
+- `call()` / `back()`
+- `prepareSharedStack()`
+- `saveSharedStackSnapshot()` / `restoreSharedStackSnapshot()`
+
+### 6.2 Scheduler
+- `scheduleEx()`
+- `setPolicy()` / `getPolicy()`
+- `setMLFQConfig()` / `getMLFQConfig()`
+- `pickNextTaskLocked()`
+
+### 6.3 CoroutinePool
+- `acquire()`
+- `release()`
+- `cachedCount()`
+
+## 7. 关键功能示例
+
+### 7.1 共享栈 + 调度策略
+```cpp
+#include <mycoroutine/scheduler.h>
+#include <mycoroutine/fiber.h>
+
+int main() {
+    mycoroutine::Fiber::SetSharedStackSlotCount(4);
+
+    mycoroutine::Scheduler sc(1, true, "demo");
+    sc.setPolicy(mycoroutine::SchedulePolicy::PRIORITY);
+
+    mycoroutine::ScheduleOptions high;
+    high.priority = 10;
+
+    sc.scheduleEx([] {
+        mycoroutine::Fiber::GetThis()->yield();
+    }, high);
+
+    sc.scheduleShared([] {
+        // 共享栈协程
+    }, 64 * 1024);
+
+    sc.stop();
+    return 0;
+}
+```
+
+### 7.2 协程嵌套
+```cpp
+#include <memory>
+#include <mycoroutine/fiber.h>
+
+int main() {
+    using mycoroutine::Fiber;
+    Fiber::GetThis();
+
+    auto child = std::make_shared<Fiber>([] {
+        Fiber::GetThis()->yield();
+    }, 0, false, false);
+
+    child->call();
+    child->call();
+    return 0;
+}
+```

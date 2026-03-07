@@ -1,482 +1,153 @@
 # MODULES
 
-## 文档目的
+## 文档用途
+说明当前项目主要模块的文件位置、职责、核心接口、调用关系和关键实现逻辑。
 
-本文档逐模块说明当前项目的职责划分、接口、依赖和调用关系。内容完全基于现有代码目录 `include/mycoroutine` 与 `src`。
+## 1. 模块总览
 
----
+| 模块 | 文件位置 | 模块职责 |
+|---|---|---|
+| coroutine/fiber | `include/mycoroutine/fiber.h` `src/fiber.cpp` | 协程对象、上下文切换、共享栈、嵌套调用 |
+| scheduler | `include/mycoroutine/scheduler.h` `src/scheduler.cpp` | 任务队列、线程调度、策略选取、协程池接入 |
+| coroutine_pool | `include/mycoroutine/coroutine_pool.h` `src/coroutine_pool.cpp` | 复用终止 Fiber，控制缓存容量 |
+| iomanager | `include/mycoroutine/iomanager.h` `src/iomanager.cpp` | `epoll + eventfd` 事件驱动和 IO 任务恢复 |
+| timer | `include/mycoroutine/timer.h` `src/timer.cpp` | 定时器管理和超时回调 |
+| hook | `include/mycoroutine/hook.h` `src/hook.cpp` | 阻塞系统调用协程化 |
+| fd_manager | `include/mycoroutine/fd_manager.h` `src/fd_manager.cpp` | fd 上下文和超时属性 |
+| thread | `include/mycoroutine/thread.h` `src/thread.cpp` | 线程封装与 TLS 线程信息 |
+| utils | `include/mycoroutine/utils.h` `src/utils.cpp` | 日志与通用工具 |
 
-## 1. 模块调用关系图（Mermaid）
+## 2. 模块明细
+
+### 2.1 coroutine/fiber
+- 文件位置：`include/mycoroutine/fiber.h`，`src/fiber.cpp`
+- 模块职责：
+  - 管理协程状态机：`READY/RUNNING/TERM`
+  - 提供 `resume/yield` 切换
+  - 实现共享栈与栈快照
+  - 实现父子协程嵌套 `call/back`
+- 核心接口：
+  - `Fiber(cb, stacksize, run_in_scheduler, use_shared_stack)`
+  - `reset(cb)`
+  - `resume()` / `yield()`
+  - `call()` / `back()` / `parent()`
+  - `SetSharedStackSlotCount()` / `GetSharedStackSlotCount()`
+- 调用关系：
+  - 被 `Scheduler` 执行和调度
+  - 依赖 `Thread` 获取线程 ID
+- 关键实现逻辑：
+  - 共享栈场景中在 `prepareSharedStack()` 处理槽位占用切换与快照恢复。
+
+### 2.2 scheduler
+- 文件位置：`include/mycoroutine/scheduler.h`，`src/scheduler.cpp`
+- 模块职责：
+  - 管理线程池与任务队列
+  - 依据策略选择下一个任务
+  - 运行 Fiber 或回调任务
+- 核心接口：
+  - `scheduleLock(fc, thread)`
+  - `scheduleEx(fc, ScheduleOptions)`
+  - `scheduleShared(cb, stacksize, thread)`
+  - `setPolicy()` / `getPolicy()`
+  - `setMLFQConfig()` / `getMLFQConfig()`
+  - `start()` / `stop()`
+- 调用关系：
+  - 调用 `Fiber` 执行协程
+  - 调用 `CoroutinePool` 复用回调协程
+  - 被 `IOManager` 继承扩展
+- 关键实现逻辑：
+  - `pickNextTaskLocked()` 实现 FIFO/PRIORITY/MLFQ/EDF/HYBRID 五种选取规则。
+
+### 2.3 coroutine_pool
+- 文件位置：`include/mycoroutine/coroutine_pool.h`，`src/coroutine_pool.cpp`
+- 模块职责：
+  - 缓存并复用 `TERM` Fiber
+  - 限制每个 key 的缓存数量
+- 核心接口：
+  - `acquire(cb, stacksize, run_in_scheduler, use_shared_stack)`
+  - `release(fiber, stacksize, run_in_scheduler, use_shared_stack)`
+  - `setMaxCachedPerKey()` / `getMaxCachedPerKey()`
+  - `cachedCount()` / `clear()`
+- 调用关系：
+  - 被 `Scheduler::run()` 在回调执行路径使用
+- 关键实现逻辑：
+  - 通过 `makeKey()` 将栈配置和运行模式编码到同一桶键。
+
+### 2.4 iomanager
+- 文件位置：`include/mycoroutine/iomanager.h`，`src/iomanager.cpp`
+- 模块职责：
+  - 管理 `epoll` 事件和 `eventfd` 唤醒
+  - 将 IO 就绪事件转为调度任务
+- 核心接口：
+  - `addEvent()` / `delEvent()` / `cancelEvent()` / `cancelAll()`
+- 调用关系：
+  - 继承 `Scheduler` 和 `TimerManager`
+  - 被 `hook` 调用
+- 关键实现逻辑：
+  - `idle()` 中统一处理 epoll 事件与到期定时器。
+
+### 2.5 timer
+- 文件位置：`include/mycoroutine/timer.h`，`src/timer.cpp`
+- 模块职责：
+  - 维护定时器集合
+  - 提供到期回调收集
+- 核心接口：
+  - `addTimer()` / `addConditionTimer()`
+  - `getNextTimer()` / `listExpiredCb()`
+- 调用关系：
+  - 被 `IOManager` 使用
+- 关键实现逻辑：
+  - 以到期时间排序，支持循环定时器。
+
+### 2.6 hook + fd_manager
+- 文件位置：
+  - hook：`include/mycoroutine/hook.h`，`src/hook.cpp`
+  - fd_manager：`include/mycoroutine/fd_manager.h`，`src/fd_manager.cpp`
+- 模块职责：
+  - `hook`：将阻塞 IO 改写为协程等待
+  - `fd_manager`：记录 fd 的属性和超时
+- 核心接口：
+  - `set_hook_enable()` / `is_hook_enable()`
+  - `FdMgr::get()` / `FdMgr::del()`
+- 调用关系：
+  - hook 依赖 `IOManager` 与 `FdMgr`
+- 关键实现逻辑：
+  - `do_io` 模板统一处理 EINTR/EAGAIN/超时。
+
+### 2.7 thread + utils
+- 文件位置：
+  - thread：`include/mycoroutine/thread.h`，`src/thread.cpp`
+  - utils：`include/mycoroutine/utils.h`，`src/utils.cpp`
+- 模块职责：
+  - `thread`：线程创建、join、线程名
+  - `utils`：日志和基础工具
+- 核心接口：
+  - `Thread::GetThreadId()` / `Thread::SetName()`
+  - `Logger::log(...)`
+- 调用关系：
+  - 被 `Fiber/Scheduler/IOManager` 等核心模块调用。
+
+## 3. 调用关系图
 
 ```mermaid
-graph LR
-    APP[App / examples]
-    SCH[Scheduler]
-    FIB[Fiber]
-    IOM[IOManager]
-    TIM[TimerManager]
-    HK[Hook]
-    FDM[FdManager]
-    THR[Thread]
-    UTL[Utils]
+flowchart LR
+    APP[tests/examples] --> SCH[Scheduler]
+    APP --> IOM[IOManager]
 
-    APP --> SCH
-    APP --> IOM
-
-    SCH --> FIB
-    SCH --> THR
-    SCH --> HK
+    SCH --> FIB[Fiber]
+    SCH --> POOL[CoroutinePool]
+    SCH --> THR[Thread]
 
     IOM --> SCH
-    IOM --> TIM
-    IOM --> FIB
+    IOM --> TIM[Timer]
 
-    HK --> IOM
-    HK --> FDM
-    HK --> FIB
-
-    FDM --> HK
-
-    APP --> UTL
-    SCH --> UTL
-    IOM --> UTL
+    HOOK[hook] --> IOM
+    HOOK --> FDM[FdManager]
 ```
 
----
-
-## 2. 核心类/结构关系图（Mermaid）
-
-```mermaid
-classDiagram
-    class Fiber {
-      +resume()
-      +yield()
-      +reset(cb)
-      +GetThis()
-      +MainFunc()
-    }
-
-    class Scheduler {
-      +scheduleLock(task)
-      +start()
-      +stop()
-      +run()
-      +idle()
-    }
-
-    class IOManager {
-      +addEvent(fd,event,cb)
-      +delEvent(fd,event)
-      +cancelEvent(fd,event)
-      +cancelAll(fd)
-      +idle()
-    }
-
-    class TimerManager {
-      +addTimer(ms,cb,recurring)
-      +addConditionTimer(...)
-      +getNextTimer()
-      +listExpiredCb(cbs)
-    }
-
-    class FdManager {
-      +get(fd,auto_create)
-      +del(fd)
-    }
-
-    class FdCtx {
-      +isSocket()
-      +getTimeout(type)
-      +setTimeout(type,val)
-      +setUserNonblock(v)
-    }
-
-    Scheduler <|-- IOManager
-    TimerManager <|-- IOManager
-    IOManager --> Fiber
-    Scheduler --> Fiber
-    Hook ..> IOManager
-    Hook ..> FdManager
-    FdManager --> FdCtx
-```
-
----
-
-## 3. `fiber` 模块（协程对象 + context）
-
-## 模块名称
-
-`fiber`
-
-## 所在文件
-
-- `include/mycoroutine/fiber.h`
-- `src/fiber.cpp`
-
-## 模块职责
-
-- 表达协程实体（ID、状态、栈、回调）
-- 管理 `ucontext_t` 上下文
-- 提供协程恢复/让出接口
-- 管理线程本地协程指针（当前协程/主协程/调度协程）
-
-## 核心数据结构
-
-- `Fiber`
-  - `m_id`
-  - `m_state`（`READY/RUNNING/TERM`）
-  - `m_ctx`（`ucontext_t`）
-  - `m_stack`, `m_stacksize`
-  - `m_cb`
-  - `m_runInScheduler`
-- TLS：`t_fiber`, `t_thread_fiber`, `t_scheduler_fiber`
-
-## 对外接口
-
-- `Fiber(cb, stacksize, run_in_scheduler)`
-- `resume()`
-- `yield()`
-- `reset(cb)`
-- `static GetThis()` / `SetThis()` / `SetSchedulerFiber()` / `GetFiberId()`
-
-## 依赖关系
-
-- 依赖：`ucontext`、`atomic`、`functional`
-- 被调用：`Scheduler`、`IOManager`、`Hook`
-
-## 被谁调用
-
-- `Scheduler::run()` 调用 `resume()`
-- Hook 定时回调恢复协程时通过 `scheduleLock(fiber)` 间接调用
-
-## 调用谁
-
-- `swapcontext`, `getcontext`, `makecontext`
-
-## 关键实现要点
-
-- `MainFunc` 作为统一入口，处理回调执行、异常捕获、状态收敛与 `yield`
-- `run_in_scheduler` 决定切回 `scheduler_fiber` 还是 `thread_fiber`
-
-## 当前局限
-
-- 协程状态只有 3 种，缺少更细粒度状态（如 BLOCKED/CANCELLED）
-- 栈固定分配策略，未做栈池
-
----
-
-## 4. `scheduler` 模块（任务调度）
-
-## 模块名称
-
-`scheduler`
-
-## 所在文件
-
-- `include/mycoroutine/scheduler.h`
-- `src/scheduler.cpp`
-
-## 模块职责
-
-- 管理任务队列
-- 管理 worker 线程
-- 执行协程任务与回调任务
-- 提供调度生命周期（`start/stop`）
-
-## 核心数据结构
-
-- `ScheduleTask { fiber, cb, thread }`
-- `m_tasks`：`std::vector<ScheduleTask>`
-- `m_threads`：线程池
-- `m_activeThreadCount`, `m_idleThreadCount`
-
-## 对外接口
-
-- `scheduleLock(fc, thread=-1)`
-- `start()` / `stop()`
-- `static GetThis()`
-
-## 依赖关系
-
-- 依赖：`Fiber`、`Thread`、`hook`
-- 被调用：应用层、`IOManager`（继承）
-
-## 被谁调用
-
-- 用户程序提交任务
-- `IOManager::FdContext::triggerEvent` 回调重新入队
-
-## 调用谁
-
-- `Fiber::resume()`
-- `Thread` 创建与 `join`
-- `set_hook_enable(true)`
-
-## 关键实现要点
-
-- 回调任务会被包装为临时协程执行
-- 无任务时运行 `idle_fiber`
-- 支持 `thread` 定向任务
-
-## 当前局限
-
-- 任务容器为单 `vector` 扫描，竞争和遍历成本较高
-- 公平性/优先级控制较弱
-
----
-
-## 5. `iomanager` 模块（事件循环）
-
-## 模块名称
-
-`iomanager`
-
-## 所在文件
-
-- `include/mycoroutine/iomanager.h`
-- `src/iomanager.cpp`
-
-## 模块职责
-
-- 基于 `epoll` 注册/删除/触发 fd 事件
-- 在 `idle()` 中阻塞等待 IO 与超时
-- 将 IO 就绪事件转换为可调度任务
-
-## 核心数据结构
-
-- `FdContext`
-  - `read` / `write` 两个 `EventContext`
-  - `events` 位掩码
-  - `mutex`
-- `m_epfd`、`m_tickleFds`
-- `m_fdContexts`（fd -> `FdContext*`）
-- `m_pendingEventCount`
-
-## 对外接口
-
-- `addEvent(fd,event,cb)`
-- `delEvent(fd,event)`
-- `cancelEvent(fd,event)`
-- `cancelAll(fd)`
-- `static GetThis()`
-
-## 依赖关系
-
-- 继承 `Scheduler` 与 `TimerManager`
-- 依赖 `Fiber` 进行挂起/恢复
-
-## 被谁调用
-
-- Hook 的 `do_io` / `connect_with_timeout`
-- 应用代码直接注册事件
-
-## 调用谁
-
-- `epoll_ctl`, `epoll_wait`, `eventfd`
-- `scheduleLock()` 投递回调/协程
-
-## 关键实现要点
-
-- `eventfd` 用于唤醒阻塞在 `epoll_wait` 的线程
-- `triggerEvent` 触发后会清理事件上下文
-- `idle()` 中统一处理：IO 事件 + 过期定时器
-
-## 当前局限
-
-- `FdContext` 以裸指针存储，生命周期管理需谨慎
-- `tickle()` 对异常回写处理较保守（使用 `assert`）
-
----
-
-## 6. `timer` 模块（定时任务）
-
-## 模块名称
-
-`timer`
-
-## 所在文件
-
-- `include/mycoroutine/timer.h`
-- `src/timer.cpp`
-
-## 模块职责
-
-- 管理定时器对象集合
-- 提供到期回调抽取
-- 支持循环定时器和条件定时器
-
-## 核心数据结构
-
-- `Timer`
-  - `m_ms`, `m_next`, `m_recurring`, `m_cb`
-- `TimerManager`
-  - `m_timers`（`std::set<shared_ptr<Timer>>`）
-  - `m_tickled`
-
-## 对外接口
-
-- `addTimer(ms,cb,recurring)`
-- `addConditionTimer(ms,cb,weak_cond,recurring)`
-- `getNextTimer()`
-- `listExpiredCb(cbs)`
-
-## 依赖关系
-
-- 被 `IOManager` 继承并消费
-
-## 被谁调用
-
-- Hook sleep/connect 超时路径
-- `IOManager::idle()` 查询超时并抽取回调
-
-## 调用谁
-
-- `onTimerInsertedAtFront()`（由子类覆盖）
-
-## 关键实现要点
-
-- 通过比较器和 set 保持超时有序
-- 新最早定时器插入时触发唤醒
-
-## 当前局限
-
-- 仍基于 `system_clock`，受系统时钟回拨影响
-
----
-
-## 7. `hook` 模块（阻塞系统调用协程化）
-
-## 模块名称
-
-`hook`
-
-## 所在文件
-
-- `include/mycoroutine/hook.h`
-- `src/hook.cpp`
-
-## 模块职责
-
-- 保存原始系统调用函数指针（`dlsym(RTLD_NEXT, ...)`）
-- 根据线程级开关决定是否启用 Hook
-- 在 `EAGAIN` 路径将阻塞 IO 转为事件等待
-
-## 核心数据结构
-
-- TLS 开关：`t_hook_enable`
-- `timer_info`：记录超时取消状态
-
-## 对外接口
-
-- `set_hook_enable(bool)`
-- `is_hook_enable()`
-- 被 Hook 的系统调用：`sleep/usleep/nanosleep/socket/connect/accept/read/write/...`
-
-## 依赖关系
-
-- 依赖 `IOManager` 注册事件
-- 依赖 `FdManager` 判断 fd 属性和超时
-- 依赖 `Fiber` 执行 `yield`
-
-## 被谁调用
-
-- 运行时由系统调用重定向触发
-
-## 调用谁
-
-- 原始 libc 函数指针（`*_f`）
-- `IOManager::addEvent/cancelEvent`
-
-## 关键实现要点
-
-- `do_io()` 统一封装读写类系统调用
-- 超时通过条件定时器触发 `cancelEvent`
-- 协程恢复后重试原调用
-
-## 当前局限
-
-- 线程局部开关，需确保运行线程正确启用
-- 与第三方库的 Hook 兼容边界仍需实测
-
----
-
-## 8. `fd_manager` 模块（fd 元信息）
-
-## 模块名称
-
-`fd_manager`
-
-## 所在文件
-
-- `include/mycoroutine/fd_manager.h`
-- `src/fd_manager.cpp`
-
-## 模块职责
-
-- 提供 fd -> `FdCtx` 的上下文管理
-- 记录 socket/nonblock/timeout/closed 等属性
-
-## 核心数据结构
-
-- `FdCtx`
-  - `m_isSocket`, `m_sysNonblock`, `m_userNonblock`
-  - `m_recvTimeout`, `m_sendTimeout`
-- `FdManager::m_datas`（vector）
-
-## 对外接口
-
-- `FdManager::get(fd, auto_create)`
-- `FdManager::del(fd)`
-- `FdCtx::set/getTimeout`
-- `FdCtx::set/getUserNonblock`
-
-## 依赖关系
-
-- 依赖 `hook` 中原始 `fcntl_f`
-- 被 Hook 与 IO 路径频繁使用
-
-## 当前局限
-
-- 单例生命周期由进程维度管理，缺少显式销毁策略
-
----
-
-## 9. `thread` 与 `utils` 模块
-
-## 模块名称
-
-- `thread`
-- `utils`
-
-## 所在文件
-
-- `include/mycoroutine/thread.h`, `src/thread.cpp`
-- `include/mycoroutine/utils.h`, `src/utils.cpp`
-
-## 模块职责
-
-- `thread`：线程创建、命名、`join`、启动同步
-- `utils`：基础日志输出
-
-## 对外接口
-
-- `Thread(cb, name)` / `join()` / `GetThreadId()`
-- `Logger::GetInstance().log(...)`
-
-## 当前局限
-
-- 日志能力较基础，未接入 trace/span
-
----
-
-## 10. 模块协作结论
-
-该项目最核心的协作链路是：
-
-`Hook -> IOManager(epoll/timer) -> Scheduler -> Fiber`
-
-这一链路保证了：
-- 业务代码可以保留同步风格
-- 线程不被阻塞系统调用长期占用
-- 任务、IO、超时在统一调度框架下运行
-
+## 4. 运行时调用顺序
+1. 上层调用 `scheduleLock/scheduleEx/scheduleShared` 提交任务。
+2. `Scheduler` 按当前策略在 `pickNextTaskLocked()` 选任务。
+3. 任务为 `fiber` 时直接 `resume()`；任务为 `cb` 时走 `CoroutinePool`。
+4. Fiber 执行过程中可 `yield()`，在 MLFQ 下按配置重新入队。
+5. IO 类任务由 `IOManager + hook` 在事件就绪后恢复执行。
