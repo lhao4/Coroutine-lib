@@ -50,15 +50,15 @@
 │   ├── policy/main.cpp
 │   └── pool/main.cpp
 └── docs/
-    ├── ARCHITECTURE.md
-    ├── DESIGN.md
-    ├── MODULES.md
-    ├── USAGE.md
-    ├── TEST.md
-    ├── TEST_REPORT.md
-    ├── IMPROVEMENTS.md
-    ├── KNOWN_LIMITATIONS.md
-    └── UPGRADE_LOG.md
+    ├── 架构设计说明.md
+    ├── 核心设计与优化方案.md
+    ├── 模块职责说明.md
+    ├── 编译运行与使用说明.md
+    ├── 测试用例与验证说明.md
+    ├── 测试报告.md
+    ├── 优化总结与注意事项.md
+    ├── 已知限制与边界.md
+    └── 升级记录.md
 ```
 
 ## 快速编译和运行
@@ -102,12 +102,12 @@ int main() {
 ```
 
 ## 文档导航
-- `docs/ARCHITECTURE.md`：运行时架构与模块关系。
-- `docs/DESIGN.md`：四项升级的实现设计。
-- `docs/MODULES.md`：模块职责、接口、调用关系。
-- `docs/USAGE.md`：构建、运行与 API 示例。
-- `docs/TEST.md`：测试用例与验证方法。
-- `docs/TEST_REPORT.md`：最近一轮测试结论。
-- `docs/IMPROVEMENTS.md`：优化结果与运行代价。
-- `docs/KNOWN_LIMITATIONS.md`：当前版本边界。
-- `docs/UPGRADE_LOG.md`：升级变更记录。
+- `docs/架构设计说明.md`：运行时架构与模块关系。
+- `docs/核心设计与优化方案.md`：四项升级的实现设计。
+- `docs/模块职责说明.md`：模块职责、接口、调用关系。
+- `docs/编译运行与使用说明.md`：构建、运行与 API 示例。
+- `docs/测试用例与验证说明.md`：测试用例与验证方法。
+- `docs/测试报告.md`：最近一轮测试结论。
+- `docs/优化总结与注意事项.md`：优化结果与运行代价。
+- `docs/已知限制与边界.md`：当前版本边界。
+- `docs/升级记录.md`：升级变更记录。
