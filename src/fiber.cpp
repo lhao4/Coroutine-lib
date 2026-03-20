@@ -403,7 +403,7 @@ void Fiber::reset(std::function<void()> cb)
     m_state = READY;
     m_cb = std::move(cb);
     m_stackSnapshot.clear();
-    m_parent = nullptr;
+    m_parent.reset();
     m_returnToParent = false;
 
     if (!m_useSharedStack) {
@@ -488,7 +488,7 @@ int Fiber::call()
         prepareSharedStack();
     }
 
-    m_parent = parent;
+    m_parent = parent->shared_from_this();
     m_returnToParent = true;
     m_state = RUNNING;
 
@@ -499,7 +499,7 @@ int Fiber::call()
     }
 
     // 回到父协程后，清理本次调用关系，避免悬挂父指针
-    m_parent = nullptr;
+    m_parent.reset();
     m_returnToParent = false;
     return CALL_OK;
 }
@@ -521,7 +521,7 @@ void Fiber::yield()
     }
 
     // 协程嵌套：优先返回父协程
-    if (m_returnToParent && m_parent != nullptr) {
+    if (m_returnToParent && !m_parent.expired()) {
         back();
         return;
     }
@@ -550,16 +550,18 @@ void Fiber::yield()
 
 void Fiber::back()
 {
-    assert(m_parent != nullptr);
+    auto parent = m_parent.lock();
+    assert(parent && "parent fiber expired in back()");
 
-    Fiber* parent = m_parent;
+    m_parent.reset();
+    m_returnToParent = false;
 
     // 共享栈嵌套切换：切回父协程前先恢复父协程栈快照
     if (parent->m_useSharedStack) {
         parent->prepareSharedStack();
     }
 
-    SetThis(parent);
+    SetThis(parent.get());
     if (swapcontext(&m_ctx, &(parent->m_ctx))) {
         std::cerr << "back() switch to parent failed\n";
         pthread_exit(NULL);

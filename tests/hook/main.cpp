@@ -401,10 +401,10 @@ void test_iomanager_event_cancel()
             assert(fd >= 0);
 
             // 添加写事件
-            int ret = iom.addEvent(fd, mycoroutine::IOManager::WRITE, [&]() {
+            bool ret = iom.addEvent(fd, mycoroutine::IOManager::WRITE, [&]() {
                 event_fired = true;
             });
-            assert(ret == 0);
+            assert(ret);
 
             // 取消所有事件
             bool ok = iom.cancelAll(fd);

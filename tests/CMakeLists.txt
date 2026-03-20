@@ -22,6 +22,10 @@ add_executable(mycoroutine_hook_test hook/main.cpp)
 target_link_libraries(mycoroutine_hook_test PRIVATE mycoroutine::mycoroutine)
 add_test(NAME mycoroutine_hook_test COMMAND mycoroutine_hook_test)
 
+add_executable(mycoroutine_stress_test stress/main.cpp)
+target_link_libraries(mycoroutine_stress_test PRIVATE mycoroutine::mycoroutine)
+add_test(NAME mycoroutine_stress_test COMMAND mycoroutine_stress_test)
+
 if(MYCOROUTINE_BUILD_BENCHMARKS)
     add_executable(mycoroutine_benchmark bench/main.cpp)
     target_link_libraries(mycoroutine_benchmark PRIVATE mycoroutine::mycoroutine Threads::Threads)

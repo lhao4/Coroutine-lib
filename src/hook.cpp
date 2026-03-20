@@ -195,8 +195,7 @@ retry:
         }
 
         // 添加IO事件，回调为当前协程
-        int rt = iom->addEvent(fd, (mycoroutine::IOManager::Event)(event));
-        if(rt) 
+        if(!iom->addEvent(fd, (mycoroutine::IOManager::Event)(event)))
         {   // 添加事件失败
             std::cout << hook_fun_name << " addEvent("<< fd << ", " << event << ")";
             if(timer) 
@@ -427,8 +426,7 @@ int connect_with_timeout(int fd, const struct sockaddr* addr, socklen_t addrlen,
     }
 
     // 添加可写事件
-    int rt = iom->addEvent(fd, mycoroutine::IOManager::WRITE);
-    if(rt == 0) 
+    if(iom->addEvent(fd, mycoroutine::IOManager::WRITE))
     {   // 事件添加成功，让出协程执行权
         mycoroutine::Fiber::GetThis()->yield();
 

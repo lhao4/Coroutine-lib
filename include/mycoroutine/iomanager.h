@@ -89,9 +89,9 @@ namespace mycoroutine
          * @param fd 文件描述符
          * @param event 事件类型
          * @param cb 事件回调函数，默认为nullptr（使用当前协程）
-         * @return 成功返回0，失败返回-1
+         * @return 成功返回true，失败返回false
          */
-        int addEvent(int fd, Event event, std::function<void()> cb = nullptr);
+        bool addEvent(int fd, Event event, std::function<void()> cb = nullptr);
 
         /**
          * @brief 删除IO事件监控

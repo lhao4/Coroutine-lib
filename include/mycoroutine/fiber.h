@@ -124,7 +124,7 @@ public:
     /**
      * @brief 当前协程的父协程（仅嵌套调用路径有效）
      */
-    Fiber* parent() const { return m_parent; }
+    std::shared_ptr<Fiber> parent() const { return m_parent.lock(); }
 
 public:
     /**
@@ -192,7 +192,7 @@ private:
     pid_t m_ownerThread = -1;     ///< 共享栈协程绑定的线程ID
     void* m_sharedStackSlot = nullptr; ///< 共享栈槽位（内部类型擦除）
     std::vector<char> m_stackSnapshot; ///< 共享栈切出时的快照数据
-    Fiber* m_parent = nullptr;    ///< 协程嵌套场景下的父协程
+    std::weak_ptr<Fiber> m_parent; ///< 协程嵌套场景下的父协程
     bool m_returnToParent = false;///< 当前yield是否返回父协程
 
 public:
