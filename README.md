@@ -38,6 +38,8 @@
 │   ├── thread.h
 │   └── utils.h
 ├── src/
+│   ├── context_switch_x86_64.S
+│   ├── context_switch_aarch64.S
 │   ├── coroutine_pool.cpp
 │   ├── fiber.cpp
 │   ├── scheduler.cpp
@@ -69,19 +71,31 @@
     └── 面试手册.md
 ```
 
+## 性能亮点（Release, AMD Ryzen 7 6800H）
+
+| 指标 | 数值 | 说明 |
+|------|------|------|
+| Fiber 上下文切换 | **17 ns/op** | 汇编直接切换，无系统调用 |
+| Scheduler 单线程吞吐 | **527 ns/op** | deque + move 优化 |
+| Scheduler 4 线程吞吐 | **42,297 ns/op** | 多线程调度 |
+| 对比 std::thread 创建销毁 | 111,343 ns/op | 协程切换快 6500x |
+
+> 详细对比数据见 `docs/测试报告.md`。
+
 ## 快速编译和运行
 
 ### 1) Debug 构建 + 测试
 ```bash
-cmake --preset debug -DMYCOROUTINE_BUILD_BENCHMARKS=ON
+cmake --preset debug
 cmake --build --preset debug -j
 ctest --preset debug --output-on-failure
 ```
 
-### 2) Release 构建
+### 2) Release 构建 + Benchmark
 ```bash
-cmake --preset release -DMYCOROUTINE_BUILD_BENCHMARKS=ON
+cmake --preset release
 cmake --build --preset release -j
+./build/release/tests/mycoroutine_benchmark
 ```
 
 ### 3) ASan / TSan 检测
@@ -92,10 +106,9 @@ cmake --preset tsan && cmake --build --preset tsan -j && ctest --preset tsan
 
 > TSan 在 WSL2 高 ASLR 内核下需先执行 `sudo sysctl vm.mmap_rnd_bits=28`。
 
-### 4) 运行示例 / Benchmark
+### 4) 运行示例
 ```bash
 ./build/debug/examples/coroutine_http_server
-./build/release/tests/mycoroutine_benchmark
 ```
 
 ## 基本使用示例
@@ -143,7 +156,7 @@ int main() {
 ## 文档导航
 - `docs/架构设计.md`：运行时架构与模块关系。
 - `docs/核心流程.md`：启动→调度→切换→IO→退出的完整流程。
-- `docs/高级特性设计.md`：四项升级的实现设计 + 使用注意 + 已知限制。
+- `docs/高级特性设计.md`：七项核心能力的实现设计 + 使用注意 + 已知限制。
 - `docs/模块职责.md`：模块职责、接口、调用关系。
 - `docs/使用指南.md`：构建、运行与 API 示例。
 - `docs/测试用例.md`：测试用例、验证方法与最新结果。
