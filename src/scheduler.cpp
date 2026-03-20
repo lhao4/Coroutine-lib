@@ -86,7 +86,7 @@ void Scheduler::SetThis()
  * @param name 调度器名称
  */
 Scheduler::Scheduler(size_t threads, bool use_caller, const std::string &name):
-    m_name(name), m_useCaller(use_caller)
+    m_name(name), m_useCaller(use_caller), m_schedulerRef(std::make_shared<SchedulerRef>(this))
 {
     assert(threads>0 && Scheduler::GetThis()==nullptr);
 
@@ -125,7 +125,13 @@ Scheduler::Scheduler(size_t threads, bool use_caller, const std::string &name):
 Scheduler::~Scheduler()
 {
     assert(stopping()==true);
-    if (GetThis() == this) 
+    m_coroutinePool.clear();
+    if (m_schedulerRef)
+    {
+        m_schedulerRef->invalidate();
+        m_schedulerRef.reset();
+    }
+    if (GetThis() == this)
     {
         t_scheduler = nullptr;
     }
@@ -226,7 +232,7 @@ void Scheduler::run()
                         ++task.mlfq_level; // 任务用完时间片后降级
                     }
                     task.sequence = m_taskSequence++;
-                    m_tasks.push_back(task);
+                    m_tasks.emplace_back(std::move(task));
                 }
             }
 
@@ -359,6 +365,32 @@ bool Scheduler::pickNextTaskLocked(int thread_id, ScheduleTask& out_task, bool& 
         return better_priority(lhs, rhs);
     };
 
+    if (m_policy == SchedulePolicy::FIFO)
+    {
+        auto it = m_tasks.begin();
+        for (; it != m_tasks.end(); ++it)
+        {
+            if (match_thread(*it))
+            {
+                break;
+            }
+            tickle_me = true;
+        }
+
+        if (it == m_tasks.end())
+        {
+            return false;
+        }
+
+        out_task = std::move(*it);
+        m_tasks.erase(it);
+        if (!m_tasks.empty())
+        {
+            tickle_me = true;
+        }
+        return true;
+    }
+
     auto best_it = m_tasks.end();
     for (auto it = m_tasks.begin(); it != m_tasks.end(); ++it)
     {
@@ -371,10 +403,6 @@ bool Scheduler::pickNextTaskLocked(int thread_id, ScheduleTask& out_task, bool& 
         if (best_it == m_tasks.end())
         {
             best_it = it;
-            if (m_policy == SchedulePolicy::FIFO)
-            {
-                break;
-            }
             continue;
         }
 
@@ -408,7 +436,7 @@ bool Scheduler::pickNextTaskLocked(int thread_id, ScheduleTask& out_task, bool& 
         return false;
     }
 
-    out_task = *best_it;
+    out_task = std::move(*best_it);
     m_tasks.erase(best_it);
     if (!m_tasks.empty())
     {
@@ -478,6 +506,11 @@ void Scheduler::stop()
     {
         i->join();
     }
+
+    // Release cached fibers so that any transitive shared_ptrs they hold
+    // (e.g. FiberWaiter → Fiber) are freed before the scheduler is destroyed.
+    m_coroutinePool.clear();
+
     if(debug) std::cout << "Schedule::stop() ends in thread:" << Thread::GetThreadId() << std::endl;
 }
 

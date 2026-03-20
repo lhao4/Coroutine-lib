@@ -8,6 +8,7 @@
 
 #include <mutex>      // 互斥锁头文件
 #include <vector>     // 向量容器头文件
+#include <deque>      // 双端队列容器
 #include <string>     // 字符串头文件
 #include <utility>    // std::move
 #include <cstdint>    // uint64_t
@@ -53,6 +54,41 @@ struct MLFQConfig
  */
 class Scheduler
 {
+public:
+    class SchedulerRef
+    {
+    public:
+        explicit SchedulerRef(Scheduler* scheduler)
+            : m_scheduler(scheduler)
+        {
+        }
+
+        void schedule(const std::shared_ptr<Fiber>& fiber, int thread)
+        {
+            if (!fiber)
+            {
+                return;
+            }
+
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_scheduler)
+            {
+                return;
+            }
+            m_scheduler->scheduleLock(fiber, thread);
+        }
+
+        void invalidate()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_scheduler = nullptr;
+        }
+
+    private:
+        std::mutex m_mutex;
+        Scheduler* m_scheduler = nullptr;
+    };
+
 private:
     struct ScheduleTask;
 
@@ -82,6 +118,11 @@ public:
      * @return 当前线程的调度器指针
      */
     static Scheduler* GetThis();
+
+    /**
+     * @brief 获取可安全失效的调度引用
+     */
+    std::weak_ptr<SchedulerRef> getSchedulerRef() const { return m_schedulerRef; }
 
     /**
      * @brief 设置调度策略
@@ -237,7 +278,7 @@ private:
          */
         ScheduleTask(std::shared_ptr<Fiber> f, int thr)
         {
-            fiber = f;
+            fiber = std::move(f);
             thread = thr;
         }
 
@@ -259,7 +300,7 @@ private:
          */
         ScheduleTask(std::function<void()> f, int thr)
         {
-            cb = f;
+            cb = std::move(f);
             thread = thr;
         }        
 
@@ -291,7 +332,7 @@ private:
     bool m_useCaller;                    // 主线程是否用作工作线程
     std::mutex m_mutex;                  // 互斥锁，保护任务队列
     std::vector<std::shared_ptr<Thread>> m_threads;  // 线程池
-    std::vector<ScheduleTask> m_tasks;   // 任务队列
+    std::deque<ScheduleTask> m_tasks;    // 任务队列
     CoroutinePool m_coroutinePool;       // 协程池（复用回调包装协程）
     SchedulePolicy m_policy = SchedulePolicy::FIFO; // 当前调度策略
     MLFQConfig m_mlfqConfig;             // MLFQ运行参数
@@ -301,6 +342,7 @@ private:
     std::atomic<size_t> m_activeThreadCount = {0};  // 活跃线程数
     std::atomic<size_t> m_idleThreadCount = {0};    // 空闲线程数
     std::shared_ptr<Fiber> m_schedulerFiber;  // 调度协程（仅当m_useCaller为true时有效）
+    std::shared_ptr<SchedulerRef> m_schedulerRef; // 对外提供的安全调度引用
     int m_rootThread = -1;               // 主线程ID（仅当m_useCaller为true时有效）
     bool m_stopping = false;             // 是否正在关闭调度器
 };
@@ -322,7 +364,7 @@ void mycoroutine::Scheduler::scheduleEx(FiberOrCb fc, const ScheduleOptions& opt
             task.mlfq_level = 0;
             task.deadline_ms = options.deadline_ms;
             task.sequence = m_taskSequence++;
-            m_tasks.push_back(task);
+            m_tasks.emplace_back(std::move(task));
         }
     }
 

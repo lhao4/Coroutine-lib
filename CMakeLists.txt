@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(mycoroutine
     VERSION 1.0.0
-    DESCRIPTION "Stackful coroutine library based on ucontext and epoll"
-    LANGUAGES CXX
+    DESCRIPTION "Stackful coroutine library based on assembly context switch and epoll"
+    LANGUAGES CXX ASM
 )
 
 include(GNUInstallDirs)
@@ -30,6 +30,14 @@ target_sources(mycoroutine
         src/utils.cpp
         src/coroutine_pool.cpp
 )
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+    target_sources(mycoroutine PRIVATE src/context_switch_x86_64.S)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    target_sources(mycoroutine PRIVATE src/context_switch_aarch64.S)
+else()
+    message(FATAL_ERROR "Unsupported architecture for mycoroutine context switch: ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
 
 target_compile_features(mycoroutine PUBLIC cxx_std_17)
 

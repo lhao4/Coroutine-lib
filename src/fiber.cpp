@@ -3,13 +3,41 @@
 
 #include <cstring>
 #include <cstdint>
+#include <cstddef>
 #include <cstdlib>
 #include <memory>
 #include <unordered_map>
-#include <sys/ucontext.h>
+
+#if defined(__SANITIZE_ADDRESS__)
+#define MYCOROUTINE_HAS_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define MYCOROUTINE_HAS_ASAN 1
+#endif
+#endif
+#ifndef MYCOROUTINE_HAS_ASAN
+#define MYCOROUTINE_HAS_ASAN 0
+#endif
+
+#if MYCOROUTINE_HAS_ASAN
+#include <sanitizer/asan_interface.h>
+#endif
 
 // 调试模式开关，设置为true时会输出协程的创建、销毁和切换信息
 static bool debug = false;
+
+extern "C" {
+__attribute__((weak)) void __sanitizer_start_switch_fiber(void** fake_stack_save,
+                                                           const void* bottom,
+                                                           size_t size);
+__attribute__((weak)) void __sanitizer_finish_switch_fiber(void* fake_stack_save,
+                                                            const void** bottom_old,
+                                                            size_t* size_old);
+__attribute__((weak)) void* __tsan_create_fiber(unsigned flags);
+__attribute__((weak)) void __tsan_destroy_fiber(void* fiber);
+__attribute__((weak)) void __tsan_switch_to_fiber(void* fiber, unsigned flags);
+__attribute__((weak)) void* __tsan_get_current_fiber();
+}
 
 namespace mycoroutine {
 
@@ -61,17 +89,68 @@ static SharedStackSlot* ToSharedStackSlot(void* slot) {
     return reinterpret_cast<SharedStackSlot*>(slot);
 }
 
-static uintptr_t GetContextStackPointer(const ucontext_t& ctx) {
-#if defined(__x86_64__) && defined(REG_RSP)
-    return static_cast<uintptr_t>(ctx.uc_mcontext.gregs[REG_RSP]);
-#elif defined(__i386__) && defined(REG_ESP)
-    return static_cast<uintptr_t>(ctx.uc_mcontext.gregs[REG_ESP]);
+static uintptr_t AlignDown(uintptr_t value, size_t alignment) {
+    assert(alignment > 0);
+    return value & ~(static_cast<uintptr_t>(alignment) - 1);
+}
+
+static uintptr_t GetContextStackPointer(const FiberContext& ctx) {
+#if defined(__x86_64__)
+    return reinterpret_cast<uintptr_t>(ctx.rsp);
 #elif defined(__aarch64__)
-    return static_cast<uintptr_t>(ctx.uc_mcontext.sp);
+    return reinterpret_cast<uintptr_t>(ctx.sp);
 #else
-#error "shared stack currently supports x86_64/i386/aarch64"
+#error "unsupported architecture"
 #endif
 }
+
+[[noreturn]] static void FiberEntryPoint() {
+    Fiber::MainFunc();
+    std::abort();
+}
+
+static void InitFiberContextStack(FiberContext& ctx, void* stack, size_t stack_size) {
+    assert(stack != nullptr);
+    assert(stack_size > 0);
+
+    ctx = FiberContext{};
+    const uintptr_t stack_bottom = reinterpret_cast<uintptr_t>(stack);
+    const uintptr_t stack_top = stack_bottom + stack_size;
+    const uintptr_t aligned_top = AlignDown(stack_top, kFiberContextStackAlignment);
+
+#if defined(__x86_64__)
+    const uintptr_t entry_sp = aligned_top - kFiberContextEntryStackAdjust;
+    *reinterpret_cast<uintptr_t*>(entry_sp) = 0;
+    ctx.rsp = reinterpret_cast<void*>(entry_sp);
+    ctx.rip = reinterpret_cast<void*>(&FiberEntryPoint);
+#elif defined(__aarch64__)
+    const uintptr_t entry_sp = aligned_top - kFiberContextEntryStackAdjust;
+    ctx.sp = reinterpret_cast<void*>(entry_sp);
+    ctx.pc = reinterpret_cast<void*>(&FiberEntryPoint);
+#else
+#error "unsupported architecture"
+#endif
+}
+
+#if defined(__x86_64__)
+static_assert(sizeof(FiberContext) == 64, "x86_64 FiberContext layout mismatch");
+static_assert(offsetof(FiberContext, rsp) == 0, "x86_64 rsp offset mismatch");
+static_assert(offsetof(FiberContext, rip) == 8, "x86_64 rip offset mismatch");
+static_assert(offsetof(FiberContext, rbx) == 16, "x86_64 rbx offset mismatch");
+static_assert(offsetof(FiberContext, rbp) == 24, "x86_64 rbp offset mismatch");
+static_assert(offsetof(FiberContext, r12) == 32, "x86_64 r12 offset mismatch");
+static_assert(offsetof(FiberContext, r13) == 40, "x86_64 r13 offset mismatch");
+static_assert(offsetof(FiberContext, r14) == 48, "x86_64 r14 offset mismatch");
+static_assert(offsetof(FiberContext, r15) == 56, "x86_64 r15 offset mismatch");
+#elif defined(__aarch64__)
+static_assert(sizeof(FiberContext) == 176, "aarch64 FiberContext layout mismatch");
+static_assert(offsetof(FiberContext, sp) == 0, "aarch64 sp offset mismatch");
+static_assert(offsetof(FiberContext, pc) == 8, "aarch64 pc offset mismatch");
+static_assert(offsetof(FiberContext, x19) == 16, "aarch64 x19 offset mismatch");
+static_assert(offsetof(FiberContext, x30) == 104, "aarch64 x30 offset mismatch");
+static_assert(offsetof(FiberContext, d8) == 112, "aarch64 d8 offset mismatch");
+static_assert(offsetof(FiberContext, d15) == 168, "aarch64 d15 offset mismatch");
+#endif
 
 } // namespace
 
@@ -185,22 +264,43 @@ size_t Fiber::GetSharedStackSlotCount()
 void Fiber::initFiberContext()
 {
     assert(m_stack != nullptr && m_stacksize > 0);
+    InitFiberContextStack(m_ctx, m_stack, m_stacksize);
+    m_ctxInitialized = true;
+}
 
-    // 获取当前上下文作为基础
-    if(getcontext(&m_ctx))
+void Fiber::swapWithSanitizer(Fiber* from, Fiber* to)
+{
+    assert(from != nullptr);
+    assert(to != nullptr);
+
+    const bool has_sanitizer_hooks =
+        (__sanitizer_start_switch_fiber != nullptr) &&
+        (__sanitizer_finish_switch_fiber != nullptr);
+    if (has_sanitizer_hooks)
     {
-        std::cerr << "initFiberContext() failed\n";
-        pthread_exit(NULL);
+        const void* next_stack_bottom = nullptr;
+        size_t next_stack_size = 0;
+        if (to->m_stack != nullptr && to->m_stacksize > 0)
+        {
+            next_stack_bottom = to->m_stack;
+            next_stack_size = to->m_stacksize;
+        }
+        __sanitizer_start_switch_fiber(&from->m_sanitizerFakeStack, next_stack_bottom, next_stack_size);
     }
 
-    // 设置上下文属性
-    m_ctx.uc_link = nullptr;
-    m_ctx.uc_stack.ss_sp = m_stack;
-    m_ctx.uc_stack.ss_size = m_stacksize;
+    if (__tsan_switch_to_fiber != nullptr && to->m_tsanFiber != nullptr)
+    {
+        __tsan_switch_to_fiber(to->m_tsanFiber, 0);
+    }
 
-    // 创建协程上下文，设置入口函数为MainFunc
-    makecontext(&m_ctx, &Fiber::MainFunc, 0);
-    m_ctxInitialized = true;
+    mycoroutine_context_swap(&(from->m_ctx), &(to->m_ctx));
+
+    if (has_sanitizer_hooks)
+    {
+        const void* old_stack_bottom = nullptr;
+        size_t old_stack_size = 0;
+        __sanitizer_finish_switch_fiber(from->m_sanitizerFakeStack, &old_stack_bottom, &old_stack_size);
+    }
 }
 
 void Fiber::saveSharedStackSnapshot()
@@ -221,6 +321,12 @@ void Fiber::saveSharedStackSnapshot()
 
     m_stackSnapshot.resize(used);
     if (used > 0) {
+#if MYCOROUTINE_HAS_ASAN
+        // Unpoison the shared stack region so we can snapshot it.
+        // ASan plants redzone markers for local variables on this heap-backed
+        // stack, which would otherwise trigger a false positive during memcpy.
+        __asan_unpoison_memory_region(reinterpret_cast<void*>(sp), used);
+#endif
         memcpy(m_stackSnapshot.data(), reinterpret_cast<void*>(sp), used);
     }
 }
@@ -244,6 +350,9 @@ void Fiber::saveCurrentSharedStackSnapshot()
 
     m_stackSnapshot.resize(used);
     if (used > 0) {
+#if MYCOROUTINE_HAS_ASAN
+        __asan_unpoison_memory_region(reinterpret_cast<const void*>(sp), used);
+#endif
         memcpy(m_stackSnapshot.data(), reinterpret_cast<const void*>(sp), used);
     }
 }
@@ -325,14 +434,15 @@ Fiber::Fiber()
     // 主协程创建时处于运行状态
     m_state = RUNNING;
 
-    // 获取当前上下文
-    if(getcontext(&m_ctx))
-    {
-        std::cerr << "Fiber() failed\n";
-        pthread_exit(NULL);
-    }
-
+    m_ctx = FiberContext{};
     m_ctxInitialized = true;
+    m_sanitizerFakeStack = nullptr;
+
+    if (__tsan_get_current_fiber != nullptr)
+    {
+        m_tsanFiber = __tsan_get_current_fiber();
+        m_ownsTsanFiber = false;
+    }
 
     // 分配唯一ID并增加协程计数
     m_id = s_fiber_id++;
@@ -364,6 +474,13 @@ Fiber::Fiber(std::function<void()> cb, size_t stacksize, bool run_in_scheduler, 
         initFiberContext();
     }
 
+    m_sanitizerFakeStack = nullptr;
+    if (__tsan_create_fiber != nullptr)
+    {
+        m_tsanFiber = __tsan_create_fiber(0);
+        m_ownsTsanFiber = (m_tsanFiber != nullptr);
+    }
+
     // 分配唯一ID并增加协程计数
     m_id = s_fiber_id++;
     s_fiber_count++;
@@ -379,6 +496,13 @@ Fiber::Fiber(std::function<void()> cb, size_t stacksize, bool run_in_scheduler, 
 Fiber::~Fiber()
 {
     s_fiber_count--;
+
+    if (m_ownsTsanFiber && m_tsanFiber && __tsan_destroy_fiber != nullptr)
+    {
+        __tsan_destroy_fiber(m_tsanFiber);
+    }
+    m_tsanFiber = nullptr;
+    m_ownsTsanFiber = false;
 
     if (!m_useSharedStack && m_stack) {
         free(m_stack);
@@ -442,22 +566,16 @@ void Fiber::resume()
     if(m_runInScheduler)
     {
         // 如果协程在调度器中运行，则切换到调度协程
+        assert(t_scheduler_fiber != nullptr);
         SetThis(this);
-        if(swapcontext(&(t_scheduler_fiber->m_ctx), &m_ctx))
-        {
-            std::cerr << "resume() to t_scheduler_fiber failed\n";
-            pthread_exit(NULL);
-        }
+        swapWithSanitizer(t_scheduler_fiber, this);
     }
     else
     {
         // 如果协程不在调度器中运行，则切换到主协程
+        assert(t_thread_fiber != nullptr);
         SetThis(this);
-        if(swapcontext(&(t_thread_fiber->m_ctx), &m_ctx))
-        {
-            std::cerr << "resume() to t_thread_fiber failed\n";
-            pthread_exit(NULL);
-        }
+        swapWithSanitizer(t_thread_fiber.get(), this);
     }
 }
 
@@ -493,10 +611,7 @@ int Fiber::call()
     m_state = RUNNING;
 
     SetThis(this);
-    if (swapcontext(&(parent->m_ctx), &m_ctx)) {
-        std::cerr << "call() switch to child failed\n";
-        pthread_exit(NULL);
-    }
+    swapWithSanitizer(parent, this);
 
     // 回到父协程后，清理本次调用关系，避免悬挂父指针
     m_parent.reset();
@@ -529,22 +644,16 @@ void Fiber::yield()
     if(m_runInScheduler)
     {
         // 如果协程在调度器中运行，则切换回调度协程
+        assert(t_scheduler_fiber != nullptr);
         SetThis(t_scheduler_fiber);
-        if(swapcontext(&m_ctx, &(t_scheduler_fiber->m_ctx)))
-        {
-            std::cerr << "yield() to to t_scheduler_fiber failed\n";
-            pthread_exit(NULL);
-        }
+        swapWithSanitizer(this, t_scheduler_fiber);
     }
     else
     {
         // 如果协程不在调度器中运行，则切换回主协程
+        assert(t_thread_fiber != nullptr);
         SetThis(t_thread_fiber.get());
-        if(swapcontext(&m_ctx, &(t_thread_fiber->m_ctx)))
-        {
-            std::cerr << "yield() to t_thread_fiber failed\n";
-            pthread_exit(NULL);
-        }
+        swapWithSanitizer(this, t_thread_fiber.get());
     }
 }
 
@@ -562,10 +671,7 @@ void Fiber::back()
     }
 
     SetThis(parent.get());
-    if (swapcontext(&m_ctx, &(parent->m_ctx))) {
-        std::cerr << "back() switch to parent failed\n";
-        pthread_exit(NULL);
-    }
+    swapWithSanitizer(this, parent.get());
 }
 
 /**
@@ -578,6 +684,17 @@ void Fiber::MainFunc()
     // 获取当前协程的智能指针，延长其生命周期
     std::shared_ptr<Fiber> curr = GetThis();
     assert(curr != nullptr);
+
+    // Complete the ASan fiber switch that was started by the caller's
+    // swapWithSanitizer().  Without this, ASan thinks we are still mid-switch
+    // and the next start_switch_fiber (in yield()) would abort.
+    if (__sanitizer_finish_switch_fiber != nullptr)
+    {
+        const void* old_bottom = nullptr;
+        size_t old_size = 0;
+        __sanitizer_finish_switch_fiber(
+            curr->m_sanitizerFakeStack, &old_bottom, &old_size);
+    }
 
     try
     {

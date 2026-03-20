@@ -18,6 +18,10 @@ add_executable(mycoroutine_pool_test pool/main.cpp)
 target_link_libraries(mycoroutine_pool_test PRIVATE mycoroutine::mycoroutine)
 add_test(NAME mycoroutine_pool_test COMMAND mycoroutine_pool_test)
 
+add_executable(mycoroutine_sync_test sync/main.cpp)
+target_link_libraries(mycoroutine_sync_test PRIVATE mycoroutine::mycoroutine)
+add_test(NAME mycoroutine_sync_test COMMAND mycoroutine_sync_test)
+
 add_executable(mycoroutine_hook_test hook/main.cpp)
 target_link_libraries(mycoroutine_hook_test PRIVATE mycoroutine::mycoroutine)
 add_test(NAME mycoroutine_hook_test COMMAND mycoroutine_hook_test)
