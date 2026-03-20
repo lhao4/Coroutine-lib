@@ -6,15 +6,16 @@
 #include <atomic>       // 原子操作
 #include <functional>   // 函数对象
 #include <cassert>      // 断言
-#include <ucontext.h>   // 上下文切换
 #include <unistd.h>     // 系统调用
 #include <mutex>        // 互斥锁
 #include <vector>       // 栈快照缓存
 
+#include <mycoroutine/context.h>
+
 namespace mycoroutine {
 
 /**
- * @brief 协程类，基于ucontext_t实现的用户级协程
+ * @brief 协程类，基于汇编上下文切换实现的用户级协程
  * @details 该类实现了用户级协程功能，支持协程的创建、切换、恢复和销毁
  *          使用智能指针管理协程生命周期，避免资源泄漏
  */
@@ -183,7 +184,7 @@ private:
     uint64_t m_id = 0;            ///< 协程ID，唯一标识一个协程
     uint32_t m_stacksize = 0;     ///< 协程栈大小
     State m_state = READY;        ///< 协程状态
-    ucontext_t m_ctx;             ///< 协程上下文，保存执行环境
+    FiberContext m_ctx;           ///< 协程上下文，保存执行环境
     void* m_stack = nullptr;      ///< 协程栈指针，指向分配的栈空间
     std::function<void()> m_cb;   ///< 协程回调函数，协程要执行的任务
     bool m_runInScheduler = true; ///< 是否在调度器中运行，决定让出时返回到哪个协程
