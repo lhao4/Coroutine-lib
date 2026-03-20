@@ -114,6 +114,7 @@ Scheduler(threads, use_caller, name), TimerManager()
     // 将eventfd添加到epoll监控
     int rt = epoll_ctl(m_epfd, EPOLL_CTL_ADD, m_tickleFds, &event);
     assert(!rt);
+    (void)rt;
 
     // 初始化文件描述符上下文数组，初始大小为32
     contextResize(32);
@@ -170,11 +171,11 @@ void IOManager::contextResize(size_t size)
  * @param cb 事件回调函数，如果为nullptr则使用当前协程
  * @return 成功返回0，失败返回-1
  */
-int IOManager::addEvent(int fd, Event event, std::function<void()> cb) 
+bool IOManager::addEvent(int fd, Event event, std::function<void()> cb)
 {
-    if (fd < 0) 
+    if (fd < 0)
     {
-        return -1;
+        return false;
     }
 
     // 尝试获取文件描述符对应的上下文
@@ -201,9 +202,9 @@ int IOManager::addEvent(int fd, Event event, std::function<void()> cb)
     std::lock_guard<std::mutex> lock(fd_ctx->mutex);
     
     // 检查事件是否已经注册
-    if(fd_ctx->events & event) 
+    if(fd_ctx->events & event)
     {
-        return -1;
+        return false;
     }
 
     // 确定epoll操作类型：修改或添加
@@ -216,8 +217,8 @@ int IOManager::addEvent(int fd, Event event, std::function<void()> cb)
     int rt = epoll_ctl(m_epfd, op, fd, &epevent);
     if (rt) 
     {
-        std::cerr << "addEvent::epoll_ctl failed: " << strerror(errno) << std::endl; 
-        return -1;
+        std::cerr << "addEvent::epoll_ctl failed: " << strerror(errno) << std::endl;
+        return false;
     }
 
     // 增加待处理事件计数
@@ -242,7 +243,7 @@ int IOManager::addEvent(int fd, Event event, std::function<void()> cb)
         event_ctx.fiber = Fiber::GetThis();
         assert(event_ctx.fiber->getState() == Fiber::RUNNING);
     }
-    return 0;
+    return true;
 }
 
 /**
@@ -431,6 +432,7 @@ void IOManager::tickle()
     uint64_t one = 1;
     int rt = write(m_tickleFds, &one, sizeof(one));
     assert(rt == sizeof(one)); // 确保写入成功
+    (void)rt;
 }
 
 /**
@@ -520,8 +522,14 @@ void IOManager::idle()
             std::lock_guard<std::mutex> lock(fd_ctx->mutex);
 
             // 将错误或挂起事件转换为对应的读或写事件
-            if (event.events & (EPOLLERR | EPOLLHUP)) 
+            if (event.events & EPOLLERR)
             {
+                std::cerr << "epoll error on fd=" << fd_ctx->fd << std::endl;
+                event.events |= (EPOLLIN | EPOLLOUT) & fd_ctx->events;
+            }
+            if (event.events & EPOLLHUP)
+            {
+                if (debug) std::cerr << "epoll hangup on fd=" << fd_ctx->fd << std::endl;
                 event.events |= (EPOLLIN | EPOLLOUT) & fd_ctx->events;
             }
             

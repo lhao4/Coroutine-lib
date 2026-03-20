@@ -8,6 +8,24 @@ namespace mycoroutine {
 // 线程局部存储，指向当前线程的调度器实例
 static thread_local Scheduler* t_scheduler = nullptr;
 
+namespace {
+
+MLFQConfig NormalizeMLFQConfig(const MLFQConfig& config)
+{
+    MLFQConfig normalized = config;
+    if (normalized.levels == 0)
+    {
+        normalized.levels = 1;
+    }
+    if (normalized.aging_sequence_gap == 0)
+    {
+        normalized.aging_sequence_gap = 1;
+    }
+    return normalized;
+}
+
+} // namespace
+
 /**
  * @brief 获取当前线程的调度器实例
  * @return 当前线程的调度器指针
@@ -15,6 +33,42 @@ static thread_local Scheduler* t_scheduler = nullptr;
 Scheduler* Scheduler::GetThis()
 {
     return t_scheduler;
+}
+
+void Scheduler::setPolicy(SchedulePolicy policy)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_policy = policy;
+}
+
+SchedulePolicy Scheduler::getPolicy()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_policy;
+}
+
+void Scheduler::setMLFQConfig(const MLFQConfig& config)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_mlfqConfig = NormalizeMLFQConfig(config);
+}
+
+MLFQConfig Scheduler::getMLFQConfig()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_mlfqConfig;
+}
+
+void Scheduler::setCoroutinePoolMaxCachedPerKey(size_t max_cached_per_key)
+{
+    m_coroutinePool.setMaxCachedPerKey(max_cached_per_key);
+}
+
+size_t Scheduler::getCoroutinePoolCachedCount(size_t stacksize,
+                                              bool run_in_scheduler,
+                                              bool use_shared_stack)
+{
+    return m_coroutinePool.cachedCount(stacksize, run_in_scheduler, use_shared_stack);
 }
 
 /**
@@ -134,26 +188,10 @@ void Scheduler::run()
 
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            auto it = m_tasks.begin();
-            // 1 遍历任务队列
-            while(it!=m_tasks.end())
+            if (pickNextTaskLocked(thread_id, task, tickle_me))
             {
-                // 如果任务指定了线程且不是当前线程，则跳过
-                if(it->thread!=-1&&it->thread!=thread_id)
-                {
-                    it++;
-                    tickle_me = true;
-                    continue;
-                }
-
-                // 2 取出任务
-                assert(it->fiber||it->cb);
-                task = *it;
-                m_tasks.erase(it); 
                 m_activeThreadCount++;
-                break;
             }
-            tickle_me = tickle_me || (it != m_tasks.end());
         }
 
         // 如果有其他线程的任务，唤醒其他线程
@@ -173,16 +211,50 @@ void Scheduler::run()
                     task.fiber->resume();    
                 }
             }
+
+            bool mlfq_requeue = false;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                mlfq_requeue = (m_policy == SchedulePolicy::MLFQ) &&
+                               task.fiber &&
+                               task.fiber->getState() == Fiber::READY;
+                if (mlfq_requeue)
+                {
+                    const uint8_t max_level = static_cast<uint8_t>(m_mlfqConfig.levels - 1);
+                    if (m_mlfqConfig.demote_on_yield && task.mlfq_level < max_level)
+                    {
+                        ++task.mlfq_level; // 任务用完时间片后降级
+                    }
+                    task.sequence = m_taskSequence++;
+                    m_tasks.push_back(task);
+                }
+            }
+
+            if (mlfq_requeue)
+            {
+                tickle();
+            }
+
             m_activeThreadCount--;
             task.reset();
         }
         else if(task.cb)
         {
-            // 创建新的协程来执行回调函数
-            std::shared_ptr<Fiber> cb_fiber = std::make_shared<Fiber>(task.cb);
+            // 使用协程池复用回调协程
+            std::shared_ptr<Fiber> cb_fiber = m_coroutinePool.acquire(std::move(task.cb));
+            if (!cb_fiber)
+            {
+                m_activeThreadCount--;
+                task.reset();
+                continue;
+            }
             {
                 std::lock_guard<std::mutex> lock(cb_fiber->m_mutex);
                 cb_fiber->resume();            
+            }
+            if (cb_fiber->getState() == Fiber::TERM)
+            {
+                m_coroutinePool.release(cb_fiber);
             }
             m_activeThreadCount--;
             task.reset();    
@@ -205,6 +277,146 @@ void Scheduler::run()
     
 }
 
+bool Scheduler::pickNextTaskLocked(int thread_id, ScheduleTask& out_task, bool& tickle_me)
+{
+    tickle_me = false;
+    if (m_tasks.empty())
+    {
+        return false;
+    }
+
+    auto match_thread = [thread_id](const ScheduleTask& task) {
+        return task.thread == -1 || task.thread == thread_id;
+    };
+
+    auto better_priority = [](const ScheduleTask& lhs, const ScheduleTask& rhs) {
+        if (lhs.priority != rhs.priority)
+        {
+            return lhs.priority > rhs.priority;
+        }
+        return lhs.sequence < rhs.sequence;
+    };
+
+    auto effective_mlfq_level = [&](const ScheduleTask& task) -> uint8_t {
+        const uint8_t max_level = static_cast<uint8_t>(m_mlfqConfig.levels - 1);
+        const uint8_t base_level = task.mlfq_level > max_level ? max_level : task.mlfq_level;
+
+        if (!m_mlfqConfig.enable_aging || base_level == 0 || task.sequence >= m_taskSequence)
+        {
+            return base_level;
+        }
+
+        const uint64_t wait_gap = m_taskSequence - task.sequence;
+        const uint64_t promote = wait_gap / m_mlfqConfig.aging_sequence_gap;
+        if (promote >= base_level)
+        {
+            return 0;
+        }
+        return static_cast<uint8_t>(base_level - promote);
+    };
+
+    auto better_mlfq = [&](const ScheduleTask& lhs, const ScheduleTask& rhs) {
+        const uint8_t lhs_level = effective_mlfq_level(lhs);
+        const uint8_t rhs_level = effective_mlfq_level(rhs);
+        if (lhs_level != rhs_level)
+        {
+            return lhs_level < rhs_level;
+        }
+        return lhs.sequence < rhs.sequence;
+    };
+
+    auto better_edf = [](const ScheduleTask& lhs, const ScheduleTask& rhs) {
+        const bool lhs_has_deadline = lhs.deadline_ms > 0;
+        const bool rhs_has_deadline = rhs.deadline_ms > 0;
+
+        if (lhs_has_deadline != rhs_has_deadline)
+        {
+            return lhs_has_deadline; // 有deadline优先于无deadline
+        }
+        if (lhs_has_deadline && rhs_has_deadline && lhs.deadline_ms != rhs.deadline_ms)
+        {
+            return lhs.deadline_ms < rhs.deadline_ms;
+        }
+        return lhs.sequence < rhs.sequence;
+    };
+
+    auto better_hybrid = [&](const ScheduleTask& lhs, const ScheduleTask& rhs) {
+        const bool lhs_has_deadline = lhs.deadline_ms > 0;
+        const bool rhs_has_deadline = rhs.deadline_ms > 0;
+
+        if (lhs_has_deadline != rhs_has_deadline)
+        {
+            return lhs_has_deadline;
+        }
+        if (lhs_has_deadline && rhs_has_deadline)
+        {
+            if (lhs.deadline_ms != rhs.deadline_ms)
+            {
+                return lhs.deadline_ms < rhs.deadline_ms;
+            }
+            return better_priority(lhs, rhs);
+        }
+        return better_priority(lhs, rhs);
+    };
+
+    auto best_it = m_tasks.end();
+    for (auto it = m_tasks.begin(); it != m_tasks.end(); ++it)
+    {
+        if (!match_thread(*it))
+        {
+            tickle_me = true;
+            continue;
+        }
+
+        if (best_it == m_tasks.end())
+        {
+            best_it = it;
+            if (m_policy == SchedulePolicy::FIFO)
+            {
+                break;
+            }
+            continue;
+        }
+
+        bool better = false;
+        switch (m_policy)
+        {
+        case SchedulePolicy::FIFO:
+            break;
+        case SchedulePolicy::PRIORITY:
+            better = better_priority(*it, *best_it);
+            break;
+        case SchedulePolicy::MLFQ:
+            better = better_mlfq(*it, *best_it);
+            break;
+        case SchedulePolicy::EDF:
+            better = better_edf(*it, *best_it);
+            break;
+        case SchedulePolicy::HYBRID:
+            better = better_hybrid(*it, *best_it);
+            break;
+        }
+
+        if (better)
+        {
+            best_it = it;
+        }
+    }
+
+    if (best_it == m_tasks.end())
+    {
+        return false;
+    }
+
+    out_task = *best_it;
+    m_tasks.erase(best_it);
+    if (!m_tasks.empty())
+    {
+        tickle_me = true;
+    }
+    return true;
+}
+
 /**
  * @brief 停止调度器
  * 等待所有任务完成，并停止所有工作线程
@@ -220,7 +432,10 @@ void Scheduler::stop()
     }
 
     // 标记调度器为停止状态
-    m_stopping = true;    
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_stopping = true;
+    }
 
     // 如果使用调用者线程作为工作线程
     if (m_useCaller) 

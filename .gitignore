@@ -24,6 +24,7 @@ Testing/
 # Editor and OS files
 .vscode/
 .idea/
+.claude/
 .DS_Store
 Thumbs.db
 *.swp

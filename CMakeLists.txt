@@ -28,6 +28,7 @@ target_sources(mycoroutine
         src/hook.cpp
         src/fd_manager.cpp
         src/utils.cpp
+        src/coroutine_pool.cpp
 )
 
 target_compile_features(mycoroutine PUBLIC cxx_std_17)

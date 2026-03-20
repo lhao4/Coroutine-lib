@@ -30,6 +30,36 @@
         "MYCOROUTINE_BUILD_EXAMPLES": "ON",
         "MYCOROUTINE_BUILD_NETWORK_DEMOS": "OFF"
       }
+    },
+    {
+      "name": "asan",
+      "displayName": "ASan",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "BUILD_TESTING": "ON",
+        "MYCOROUTINE_BUILD_EXAMPLES": "ON",
+        "MYCOROUTINE_BUILD_NETWORK_DEMOS": "OFF",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "TSan",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "BUILD_TESTING": "ON",
+        "MYCOROUTINE_BUILD_EXAMPLES": "ON",
+        "MYCOROUTINE_BUILD_NETWORK_DEMOS": "OFF",
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -g",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread"
+      }
     }
   ],
   "buildPresets": [
@@ -40,12 +70,34 @@
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
     }
   ],
   "testPresets": [
     {
       "name": "debug",
       "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
       "output": {
         "outputOnFailure": true
       }
