@@ -54,6 +54,41 @@ struct MLFQConfig
  */
 class Scheduler
 {
+public:
+    class SchedulerRef
+    {
+    public:
+        explicit SchedulerRef(Scheduler* scheduler)
+            : m_scheduler(scheduler)
+        {
+        }
+
+        void schedule(const std::shared_ptr<Fiber>& fiber, int thread)
+        {
+            if (!fiber)
+            {
+                return;
+            }
+
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_scheduler)
+            {
+                return;
+            }
+            m_scheduler->scheduleLock(fiber, thread);
+        }
+
+        void invalidate()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_scheduler = nullptr;
+        }
+
+    private:
+        std::mutex m_mutex;
+        Scheduler* m_scheduler = nullptr;
+    };
+
 private:
     struct ScheduleTask;
 
@@ -83,6 +118,11 @@ public:
      * @return 当前线程的调度器指针
      */
     static Scheduler* GetThis();
+
+    /**
+     * @brief 获取可安全失效的调度引用
+     */
+    std::weak_ptr<SchedulerRef> getSchedulerRef() const { return m_schedulerRef; }
 
     /**
      * @brief 设置调度策略
@@ -302,6 +342,7 @@ private:
     std::atomic<size_t> m_activeThreadCount = {0};  // 活跃线程数
     std::atomic<size_t> m_idleThreadCount = {0};    // 空闲线程数
     std::shared_ptr<Fiber> m_schedulerFiber;  // 调度协程（仅当m_useCaller为true时有效）
+    std::shared_ptr<SchedulerRef> m_schedulerRef; // 对外提供的安全调度引用
     int m_rootThread = -1;               // 主线程ID（仅当m_useCaller为true时有效）
     bool m_stopping = false;             // 是否正在关闭调度器
 };

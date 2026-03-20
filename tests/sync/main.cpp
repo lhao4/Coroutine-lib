@@ -1,4 +1,5 @@
 #include <cassert>
+#include <memory>
 #include <vector>
 
 #include <mycoroutine/scheduler.h>
@@ -116,6 +117,23 @@ int main() {
         for (int i = 0; i < 8; ++i) {
             assert(consumed[static_cast<size_t>(i)] == i);
         }
+    }
+
+    {
+        // waiter 生命周期长于 Scheduler 时，notify 不应触发悬空调度器访问。
+        auto gate = std::make_shared<WaitGroup>();
+        gate->add(1);
+
+        {
+            Scheduler sc(1, true, "sync_waiter_scheduler_lifetime");
+            sc.scheduleLock([gate]() {
+                gate->wait();
+            });
+            sc.stop();
+        }
+
+        // Scheduler 已析构，notify 不能崩溃（历史问题：潜在UAF）。
+        gate->done();
     }
 
     return 0;

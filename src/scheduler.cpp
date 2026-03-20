@@ -86,7 +86,7 @@ void Scheduler::SetThis()
  * @param name 调度器名称
  */
 Scheduler::Scheduler(size_t threads, bool use_caller, const std::string &name):
-    m_name(name), m_useCaller(use_caller)
+    m_name(name), m_useCaller(use_caller), m_schedulerRef(std::make_shared<SchedulerRef>(this))
 {
     assert(threads>0 && Scheduler::GetThis()==nullptr);
 
@@ -125,6 +125,11 @@ Scheduler::Scheduler(size_t threads, bool use_caller, const std::string &name):
 Scheduler::~Scheduler()
 {
     assert(stopping()==true);
+    if (m_schedulerRef)
+    {
+        m_schedulerRef->invalidate();
+        m_schedulerRef.reset();
+    }
     if (GetThis() == this) 
     {
         t_scheduler = nullptr;

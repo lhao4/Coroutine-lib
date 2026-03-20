@@ -18,13 +18,18 @@ namespace detail {
 
 struct FiberWaiter
 {
-    FiberWaiter(std::shared_ptr<Fiber> f, Scheduler* s)
-        : fiber(std::move(f)), scheduler(s)
+    FiberWaiter(std::shared_ptr<Fiber> f,
+                std::weak_ptr<Scheduler::SchedulerRef> sref,
+                int thread_id)
+        : fiber(std::move(f)),
+          schedulerRef(std::move(sref)),
+          threadId(thread_id)
     {
     }
 
     std::shared_ptr<Fiber> fiber;
-    Scheduler* scheduler = nullptr;
+    std::weak_ptr<Scheduler::SchedulerRef> schedulerRef;
+    int threadId = -1;
     std::atomic<bool> notified{false};
 };
 
@@ -34,7 +39,10 @@ inline std::shared_ptr<FiberWaiter> MakeCurrentWaiter()
     Scheduler* scheduler = Scheduler::GetThis();
     assert(current != nullptr);
     assert(scheduler != nullptr);
-    return std::make_shared<FiberWaiter>(std::move(current), scheduler);
+    return std::make_shared<FiberWaiter>(
+        std::move(current),
+        scheduler->getSchedulerRef(),
+        Thread::GetThreadId());
 }
 
 inline void NotifyWaiter(const std::shared_ptr<FiberWaiter>& waiter)
@@ -44,9 +52,10 @@ inline void NotifyWaiter(const std::shared_ptr<FiberWaiter>& waiter)
         return;
     }
     waiter->notified.store(true, std::memory_order_release);
-    if (waiter->scheduler && waiter->fiber)
+    std::shared_ptr<Scheduler::SchedulerRef> scheduler_ref = waiter->schedulerRef.lock();
+    if (scheduler_ref && waiter->fiber)
     {
-        waiter->scheduler->scheduleLock(waiter->fiber);
+        scheduler_ref->schedule(waiter->fiber, waiter->threadId);
     }
 }
 
