@@ -12,6 +12,10 @@ mycoroutine_context_swap:
     stp x25, x26, [x0, #64]
     stp x27, x28, [x0, #80]
     stp x29, x30, [x0, #96]
+    stp d8, d9, [x0, #112]
+    stp d10, d11, [x0, #128]
+    stp d12, d13, [x0, #144]
+    stp d14, d15, [x0, #160]
 
     ldr x9, [x1, #0]
     mov sp, x9
@@ -22,6 +26,10 @@ mycoroutine_context_swap:
     ldp x25, x26, [x1, #64]
     ldp x27, x28, [x1, #80]
     ldp x29, x30, [x1, #96]
+    ldp d8, d9, [x1, #112]
+    ldp d10, d11, [x1, #128]
+    ldp d12, d13, [x1, #144]
+    ldp d14, d15, [x1, #160]
     br x2
 
 .Lresume:

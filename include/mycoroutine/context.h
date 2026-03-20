@@ -41,6 +41,15 @@ struct FiberContext
     std::uint64_t x28 = 0;
     std::uint64_t x29 = 0;
     std::uint64_t x30 = 0;
+    // AAPCS64: d8-d15 are callee-saved.
+    std::uint64_t d8 = 0;
+    std::uint64_t d9 = 0;
+    std::uint64_t d10 = 0;
+    std::uint64_t d11 = 0;
+    std::uint64_t d12 = 0;
+    std::uint64_t d13 = 0;
+    std::uint64_t d14 = 0;
+    std::uint64_t d15 = 0;
 };
 
 constexpr std::size_t kFiberContextStackAlignment = 16;

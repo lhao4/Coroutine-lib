@@ -175,6 +175,7 @@ public:
 
 private:
     void initFiberContext();
+    static void swapWithSanitizer(Fiber* from, Fiber* to);
     void prepareSharedStack();
     void saveSharedStackSnapshot();
     void saveCurrentSharedStackSnapshot();
@@ -185,6 +186,9 @@ private:
     uint32_t m_stacksize = 0;     ///< 协程栈大小
     State m_state = READY;        ///< 协程状态
     FiberContext m_ctx;           ///< 协程上下文，保存执行环境
+    void* m_sanitizerFakeStack = nullptr; ///< sanitizer fiber fake stack handle
+    void* m_tsanFiber = nullptr;  ///< tsan fiber handle
+    bool m_ownsTsanFiber = false; ///< 是否拥有tsan fiber句柄
     void* m_stack = nullptr;      ///< 协程栈指针，指向分配的栈空间
     std::function<void()> m_cb;   ///< 协程回调函数，协程要执行的任务
     bool m_runInScheduler = true; ///< 是否在调度器中运行，决定让出时返回到哪个协程

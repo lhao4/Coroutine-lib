@@ -11,6 +11,19 @@
 // 调试模式开关，设置为true时会输出协程的创建、销毁和切换信息
 static bool debug = false;
 
+extern "C" {
+__attribute__((weak)) void __sanitizer_start_switch_fiber(void** fake_stack_save,
+                                                           const void* bottom,
+                                                           size_t size);
+__attribute__((weak)) void __sanitizer_finish_switch_fiber(void* fake_stack_save,
+                                                            const void** bottom_old,
+                                                            size_t* size_old);
+__attribute__((weak)) void* __tsan_create_fiber(unsigned flags);
+__attribute__((weak)) void __tsan_destroy_fiber(void* fiber);
+__attribute__((weak)) void __tsan_switch_to_fiber(void* fiber, unsigned flags);
+__attribute__((weak)) void* __tsan_get_current_fiber();
+}
+
 namespace mycoroutine {
 
 namespace {
@@ -115,11 +128,13 @@ static_assert(offsetof(FiberContext, r13) == 40, "x86_64 r13 offset mismatch");
 static_assert(offsetof(FiberContext, r14) == 48, "x86_64 r14 offset mismatch");
 static_assert(offsetof(FiberContext, r15) == 56, "x86_64 r15 offset mismatch");
 #elif defined(__aarch64__)
-static_assert(sizeof(FiberContext) == 112, "aarch64 FiberContext layout mismatch");
+static_assert(sizeof(FiberContext) == 176, "aarch64 FiberContext layout mismatch");
 static_assert(offsetof(FiberContext, sp) == 0, "aarch64 sp offset mismatch");
 static_assert(offsetof(FiberContext, pc) == 8, "aarch64 pc offset mismatch");
 static_assert(offsetof(FiberContext, x19) == 16, "aarch64 x19 offset mismatch");
 static_assert(offsetof(FiberContext, x30) == 104, "aarch64 x30 offset mismatch");
+static_assert(offsetof(FiberContext, d8) == 112, "aarch64 d8 offset mismatch");
+static_assert(offsetof(FiberContext, d15) == 168, "aarch64 d15 offset mismatch");
 #endif
 
 } // namespace
@@ -236,6 +251,41 @@ void Fiber::initFiberContext()
     assert(m_stack != nullptr && m_stacksize > 0);
     InitFiberContextStack(m_ctx, m_stack, m_stacksize);
     m_ctxInitialized = true;
+}
+
+void Fiber::swapWithSanitizer(Fiber* from, Fiber* to)
+{
+    assert(from != nullptr);
+    assert(to != nullptr);
+
+    const bool has_sanitizer_hooks =
+        (__sanitizer_start_switch_fiber != nullptr) &&
+        (__sanitizer_finish_switch_fiber != nullptr);
+    if (has_sanitizer_hooks)
+    {
+        const void* next_stack_bottom = nullptr;
+        size_t next_stack_size = 0;
+        if (to->m_stack != nullptr && to->m_stacksize > 0)
+        {
+            next_stack_bottom = to->m_stack;
+            next_stack_size = to->m_stacksize;
+        }
+        __sanitizer_start_switch_fiber(&from->m_sanitizerFakeStack, next_stack_bottom, next_stack_size);
+    }
+
+    if (__tsan_switch_to_fiber != nullptr && to->m_tsanFiber != nullptr)
+    {
+        __tsan_switch_to_fiber(to->m_tsanFiber, 0);
+    }
+
+    mycoroutine_context_swap(&(from->m_ctx), &(to->m_ctx));
+
+    if (has_sanitizer_hooks)
+    {
+        const void* old_stack_bottom = nullptr;
+        size_t old_stack_size = 0;
+        __sanitizer_finish_switch_fiber(from->m_sanitizerFakeStack, &old_stack_bottom, &old_stack_size);
+    }
 }
 
 void Fiber::saveSharedStackSnapshot()
@@ -362,6 +412,13 @@ Fiber::Fiber()
 
     m_ctx = FiberContext{};
     m_ctxInitialized = true;
+    m_sanitizerFakeStack = nullptr;
+
+    if (__tsan_get_current_fiber != nullptr)
+    {
+        m_tsanFiber = __tsan_get_current_fiber();
+        m_ownsTsanFiber = false;
+    }
 
     // 分配唯一ID并增加协程计数
     m_id = s_fiber_id++;
@@ -393,6 +450,13 @@ Fiber::Fiber(std::function<void()> cb, size_t stacksize, bool run_in_scheduler, 
         initFiberContext();
     }
 
+    m_sanitizerFakeStack = nullptr;
+    if (__tsan_create_fiber != nullptr)
+    {
+        m_tsanFiber = __tsan_create_fiber(0);
+        m_ownsTsanFiber = (m_tsanFiber != nullptr);
+    }
+
     // 分配唯一ID并增加协程计数
     m_id = s_fiber_id++;
     s_fiber_count++;
@@ -408,6 +472,13 @@ Fiber::Fiber(std::function<void()> cb, size_t stacksize, bool run_in_scheduler, 
 Fiber::~Fiber()
 {
     s_fiber_count--;
+
+    if (m_ownsTsanFiber && m_tsanFiber && __tsan_destroy_fiber != nullptr)
+    {
+        __tsan_destroy_fiber(m_tsanFiber);
+    }
+    m_tsanFiber = nullptr;
+    m_ownsTsanFiber = false;
 
     if (!m_useSharedStack && m_stack) {
         free(m_stack);
@@ -473,14 +544,14 @@ void Fiber::resume()
         // 如果协程在调度器中运行，则切换到调度协程
         assert(t_scheduler_fiber != nullptr);
         SetThis(this);
-        mycoroutine_context_swap(&(t_scheduler_fiber->m_ctx), &m_ctx);
+        swapWithSanitizer(t_scheduler_fiber, this);
     }
     else
     {
         // 如果协程不在调度器中运行，则切换到主协程
         assert(t_thread_fiber != nullptr);
         SetThis(this);
-        mycoroutine_context_swap(&(t_thread_fiber->m_ctx), &m_ctx);
+        swapWithSanitizer(t_thread_fiber.get(), this);
     }
 }
 
@@ -516,7 +587,7 @@ int Fiber::call()
     m_state = RUNNING;
 
     SetThis(this);
-    mycoroutine_context_swap(&(parent->m_ctx), &m_ctx);
+    swapWithSanitizer(parent, this);
 
     // 回到父协程后，清理本次调用关系，避免悬挂父指针
     m_parent.reset();
@@ -551,14 +622,14 @@ void Fiber::yield()
         // 如果协程在调度器中运行，则切换回调度协程
         assert(t_scheduler_fiber != nullptr);
         SetThis(t_scheduler_fiber);
-        mycoroutine_context_swap(&m_ctx, &(t_scheduler_fiber->m_ctx));
+        swapWithSanitizer(this, t_scheduler_fiber);
     }
     else
     {
         // 如果协程不在调度器中运行，则切换回主协程
         assert(t_thread_fiber != nullptr);
         SetThis(t_thread_fiber.get());
-        mycoroutine_context_swap(&m_ctx, &(t_thread_fiber->m_ctx));
+        swapWithSanitizer(this, t_thread_fiber.get());
     }
 }
 
@@ -576,7 +647,7 @@ void Fiber::back()
     }
 
     SetThis(parent.get());
-    mycoroutine_context_swap(&m_ctx, &(parent->m_ctx));
+    swapWithSanitizer(this, parent.get());
 }
 
 /**
