@@ -33,7 +33,7 @@ void test_accept();
 void error(const char *msg)
 {
     perror(msg);           // 打印系统错误信息
-    printf("erreur...\n");  // 打印自定义错误提示
+    printf("error: %s\n", msg);
     exit(1);               // 退出程序，返回错误码1
 }
 

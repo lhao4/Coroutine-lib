@@ -5,6 +5,7 @@
 #include <cstdarg>         // 可变参数支持
 #include <mycoroutine/fd_manager.h>    // 引入文件描述符管理器
 #include <string.h>        // 字符串处理函数
+#include <cassert>         // 断言
 
 // 宏定义：对所有需要hook的函数应用同一个操作
 #define HOOK_FUN(XX) \
@@ -65,14 +66,17 @@ void hook_init()
 		return;
 	}
 
-	// test
-	is_inited = true;
-
 	// 通过dlsym获取原始系统调用函数指针
 	// RTLD_NEXT表示在当前库之后搜索符号
 #define XX(name) name ## _f = (name ## _fun)dlsym(RTLD_NEXT, #name);
 	HOOK_FUN(XX)
 #undef XX
+
+#define XX(name) assert(name ## _f != nullptr);
+	HOOK_FUN(XX)
+#undef XX
+
+	is_inited = true;
 }
 
 // 静态初始化器：确保在main函数之前初始化钩子
@@ -302,17 +306,22 @@ int nanosleep(const struct timespec* req, struct timespec* rem)
 		return nanosleep_f(req, rem);
 	}    
 
-	// 计算超时时间（毫秒）
-	int timeout_ms = req->tv_sec*1000 + req->tv_nsec/1000/1000;
+	// 获取当前IO管理器；若不在IOManager线程中则回退到原始调用
+	mycoroutine::IOManager* iom = mycoroutine::IOManager::GetThis();
+	if(!iom)
+	{
+		return nanosleep_f(req, rem);
+	}
+
+	// 计算超时时间（毫秒），使用uint64_t防止tv_sec*1000溢出
+	uint64_t timeout_ms = (uint64_t)req->tv_sec * 1000 + req->tv_nsec / 1000000;
 
 	// 获取当前协程对象
 	std::shared_ptr<mycoroutine::Fiber> fiber = mycoroutine::Fiber::GetThis();
-	// 获取当前IO管理器
-	mycoroutine::IOManager* iom = mycoroutine::IOManager::GetThis();
 	// 添加定时器，在指定时间后重新调度该协程
 	iom->addTimer(timeout_ms, [fiber, iom](){iom->scheduleLock(fiber, -1);});
 	// 让出当前协程的执行权，等待定时器唤醒
-	fiber->yield();    
+	fiber->yield();
 	return 0;
 }
 
@@ -661,6 +670,8 @@ int close(int fd)
 
 	if(ctx)
 	{
+		// 标记为已关闭，使并发的do_io检查能感知到关闭状态
+		ctx->setClosed(true);
 		// 获取当前IO管理器
 		auto iom = mycoroutine::IOManager::GetThis();
 		if(iom)
