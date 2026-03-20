@@ -49,30 +49,48 @@
 │   ├── nested/main.cpp
 │   ├── policy/main.cpp
 │   ├── pool/main.cpp
-│   └── hook/main.cpp
+│   ├── hook/main.cpp
+│   ├── stress/main.cpp
+│   └── bench/main.cpp
 └── docs/
-    ├── 架构设计说明.md
-    ├── 核心流程说明.md
-    ├── 核心设计与优化方案.md
-    ├── 模块职责说明.md
-    ├── 编译运行与使用说明.md
-    ├── 测试用例与验证说明.md
-    ├── 再开发问题复盘报告.md
-    └── 面试讲解与问答手册.md
+    ├── 架构设计.md
+    ├── 核心流程.md
+    ├── 高级特性设计.md
+    ├── 模块职责.md
+    ├── 使用指南.md
+    ├── 测试用例.md
+    ├── 测试报告.md
+    ├── 问题排查与修复记录.md
+    └── 面试手册.md
 ```
 
 ## 快速编译和运行
 
 ### 1) Debug 构建 + 测试
 ```bash
-cmake --preset debug
+cmake --preset debug -DMYCOROUTINE_BUILD_BENCHMARKS=ON
 cmake --build --preset debug -j
 ctest --preset debug --output-on-failure
 ```
 
-### 2) 运行示例
+### 2) Release 构建
+```bash
+cmake --preset release -DMYCOROUTINE_BUILD_BENCHMARKS=ON
+cmake --build --preset release -j
+```
+
+### 3) ASan / TSan 检测
+```bash
+cmake --preset asan && cmake --build --preset asan -j && ctest --preset asan
+cmake --preset tsan && cmake --build --preset tsan -j && ctest --preset tsan
+```
+
+> TSan 在 WSL2 高 ASLR 内核下需先执行 `sudo sysctl vm.mmap_rnd_bits=28`。
+
+### 4) 运行示例 / Benchmark
 ```bash
 ./build/debug/examples/coroutine_http_server
+./build/release/tests/mycoroutine_benchmark
 ```
 
 ## 基本使用示例
@@ -102,11 +120,12 @@ int main() {
 ```
 
 ## 文档导航
-- `docs/架构设计说明.md`：运行时架构与模块关系。
-- `docs/核心流程说明.md`：启动→调度→切换→IO→退出的完整流程。
-- `docs/核心设计与优化方案.md`：四项升级的实现设计 + 使用注意 + 已知限制。
-- `docs/模块职责说明.md`：模块职责、接口、调用关系。
-- `docs/编译运行与使用说明.md`：构建、运行与 API 示例。
-- `docs/测试用例与验证说明.md`：测试用例、验证方法与最新结果。
-- `docs/再开发问题复盘报告.md`：11 个关键问题的决策记录。
-- `docs/面试讲解与问答手册.md`：项目介绍、Q&A、简历落地与回答策略。
+- `docs/架构设计.md`：运行时架构与模块关系。
+- `docs/核心流程.md`：启动→调度→切换→IO→退出的完整流程。
+- `docs/高级特性设计.md`：四项升级的实现设计 + 使用注意 + 已知限制。
+- `docs/模块职责.md`：模块职责、接口、调用关系。
+- `docs/使用指南.md`：构建、运行与 API 示例。
+- `docs/测试用例.md`：测试用例、验证方法与最新结果。
+- `docs/测试报告.md`：Debug / ASan / TSan 全量测试结果与性能基准。
+- `docs/问题排查与修复记录.md`：15 个关键问题的决策记录。
+- `docs/面试手册.md`：项目介绍、Q&A、简历落地与回答策略。
