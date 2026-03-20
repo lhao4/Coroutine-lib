@@ -125,12 +125,13 @@ Scheduler::Scheduler(size_t threads, bool use_caller, const std::string &name):
 Scheduler::~Scheduler()
 {
     assert(stopping()==true);
+    m_coroutinePool.clear();
     if (m_schedulerRef)
     {
         m_schedulerRef->invalidate();
         m_schedulerRef.reset();
     }
-    if (GetThis() == this) 
+    if (GetThis() == this)
     {
         t_scheduler = nullptr;
     }
@@ -505,6 +506,11 @@ void Scheduler::stop()
     {
         i->join();
     }
+
+    // Release cached fibers so that any transitive shared_ptrs they hold
+    // (e.g. FiberWaiter → Fiber) are freed before the scheduler is destroyed.
+    m_coroutinePool.clear();
+
     if(debug) std::cout << "Schedule::stop() ends in thread:" << Thread::GetThreadId() << std::endl;
 }
 

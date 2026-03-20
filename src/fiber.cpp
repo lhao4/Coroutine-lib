@@ -8,6 +8,21 @@
 #include <memory>
 #include <unordered_map>
 
+#if defined(__SANITIZE_ADDRESS__)
+#define MYCOROUTINE_HAS_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define MYCOROUTINE_HAS_ASAN 1
+#endif
+#endif
+#ifndef MYCOROUTINE_HAS_ASAN
+#define MYCOROUTINE_HAS_ASAN 0
+#endif
+
+#if MYCOROUTINE_HAS_ASAN
+#include <sanitizer/asan_interface.h>
+#endif
+
 // 调试模式开关，设置为true时会输出协程的创建、销毁和切换信息
 static bool debug = false;
 
@@ -306,6 +321,12 @@ void Fiber::saveSharedStackSnapshot()
 
     m_stackSnapshot.resize(used);
     if (used > 0) {
+#if MYCOROUTINE_HAS_ASAN
+        // Unpoison the shared stack region so we can snapshot it.
+        // ASan plants redzone markers for local variables on this heap-backed
+        // stack, which would otherwise trigger a false positive during memcpy.
+        __asan_unpoison_memory_region(reinterpret_cast<void*>(sp), used);
+#endif
         memcpy(m_stackSnapshot.data(), reinterpret_cast<void*>(sp), used);
     }
 }
@@ -329,6 +350,9 @@ void Fiber::saveCurrentSharedStackSnapshot()
 
     m_stackSnapshot.resize(used);
     if (used > 0) {
+#if MYCOROUTINE_HAS_ASAN
+        __asan_unpoison_memory_region(reinterpret_cast<const void*>(sp), used);
+#endif
         memcpy(m_stackSnapshot.data(), reinterpret_cast<const void*>(sp), used);
     }
 }
@@ -660,6 +684,17 @@ void Fiber::MainFunc()
     // 获取当前协程的智能指针，延长其生命周期
     std::shared_ptr<Fiber> curr = GetThis();
     assert(curr != nullptr);
+
+    // Complete the ASan fiber switch that was started by the caller's
+    // swapWithSanitizer().  Without this, ASan thinks we are still mid-switch
+    // and the next start_switch_fiber (in yield()) would abort.
+    if (__sanitizer_finish_switch_fiber != nullptr)
+    {
+        const void* old_bottom = nullptr;
+        size_t old_size = 0;
+        __sanitizer_finish_switch_fiber(
+            curr->m_sanitizerFakeStack, &old_bottom, &old_size);
+    }
 
     try
     {
