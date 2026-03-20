@@ -114,6 +114,7 @@ Scheduler(threads, use_caller, name), TimerManager()
     // 将eventfd添加到epoll监控
     int rt = epoll_ctl(m_epfd, EPOLL_CTL_ADD, m_tickleFds, &event);
     assert(!rt);
+    (void)rt;
 
     // 初始化文件描述符上下文数组，初始大小为32
     contextResize(32);
@@ -431,6 +432,7 @@ void IOManager::tickle()
     uint64_t one = 1;
     int rt = write(m_tickleFds, &one, sizeof(one));
     assert(rt == sizeof(one)); // 确保写入成功
+    (void)rt;
 }
 
 /**

@@ -60,6 +60,8 @@ static void stress_concurrent() {
 
         std::unique_lock<std::mutex> lock(mtx);
         cv.wait(lock, [&]() { return ready; });
+        lock.unlock();
+        *sentinel = nullptr;  // break circular reference
     }
 
     assert(counter.load() == EXPECTED);
@@ -119,6 +121,8 @@ static void stress_external_threads() {
 
         std::unique_lock<std::mutex> lock(mtx);
         cv.wait(lock, [&]() { return ready; });
+        lock.unlock();
+        *sentinel = nullptr;  // break circular reference
     }
 
     assert(counter.load() == EXPECTED);
@@ -165,6 +169,8 @@ static void stress_callback_pool() {
 
         std::unique_lock<std::mutex> lock(mtx);
         cv.wait(lock, [&]() { return ready; });
+        lock.unlock();
+        *sentinel = nullptr;  // break circular reference
     }
 
     assert(counter.load() == NUM_TASKS);

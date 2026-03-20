@@ -432,7 +432,10 @@ void Scheduler::stop()
     }
 
     // 标记调度器为停止状态
-    m_stopping = true;    
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_stopping = true;
+    }
 
     // 如果使用调用者线程作为工作线程
     if (m_useCaller) 
