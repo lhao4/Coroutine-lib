@@ -1,7 +1,7 @@
 # mycoroutine
 
-一个小型 C++17 有栈协程库，基于 `ucontext + 多线程调度 + epoll + timer + hook`。
-当前版本已完成四项核心升级：共享栈、协程嵌套、复杂调度策略、协程池。
+一个小型 C++17 有栈协程库，基于 `汇编上下文切换 + 多线程调度 + epoll + timer + hook`。
+当前版本已完成七项核心能力：共享栈、协程嵌套、复杂调度策略、协程池、协程同步原语、任务队列优化、汇编切换。
 
 ## 项目简介
 `mycoroutine` 提供从协程创建、切换、调度到 IO 挂起恢复的完整链路，代码规模可控，适合系统编程学习与运行时实现实践。
@@ -13,10 +13,12 @@
 
 ## 项目特点
 - 有栈协程（stackful），支持显式 `yield/resume`。
+- 汇编上下文切换（x86_64 / aarch64），替代 `ucontext`。
 - 协程嵌套支持 `call/back`，`call()` 使用错误码返回。
 - 调度器支持 `FIFO / PRIORITY / MLFQ / EDF / HYBRID`。
 - 共享栈支持按线程配置槽位并执行快照保存/恢复。
 - 协程池支持 `TERM` 协程复用，降低频繁创建销毁开销。
+- 协程同步原语：`CoMutex`、`Channel<T>`、`WaitGroup`。
 
 ## 目录结构概览
 
@@ -25,9 +27,11 @@
 ├── CMakeLists.txt
 ├── include/mycoroutine/
 │   ├── coroutine_pool.h
+│   ├── context.h
 │   ├── fiber.h
 │   ├── scheduler.h
 │   ├── iomanager.h
+│   ├── sync.h
 │   ├── timer.h
 │   ├── hook.h
 │   ├── fd_manager.h
@@ -49,6 +53,7 @@
 │   ├── nested/main.cpp
 │   ├── policy/main.cpp
 │   ├── pool/main.cpp
+│   ├── sync/main.cpp
 │   ├── hook/main.cpp
 │   ├── stress/main.cpp
 │   └── bench/main.cpp
@@ -97,6 +102,7 @@ cmake --preset tsan && cmake --build --preset tsan -j && ctest --preset tsan
 
 ```cpp
 #include <mycoroutine/scheduler.h>
+#include <mycoroutine/sync.h>
 
 int main() {
     mycoroutine::Scheduler sc(1, true, "demo");
@@ -114,6 +120,21 @@ int main() {
         mycoroutine::Fiber::GetThis()->yield();
     }, 64 * 1024);
 
+    mycoroutine::Channel<int> ch(1);
+    mycoroutine::WaitGroup wg;
+    wg.add(1);
+    sc.scheduleLock([&]() {
+        ch.send(42);
+        wg.done();
+    });
+    sc.scheduleLock([&]() {
+        int value = 0;
+        if (ch.recv(value)) {
+            // value == 42
+        }
+        wg.wait();
+    });
+
     sc.stop();
     return 0;
 }
@@ -129,3 +150,4 @@ int main() {
 - `docs/测试报告.md`：Debug / ASan / TSan 全量测试结果与性能基准。
 - `docs/问题排查与修复记录.md`：15 个关键问题的决策记录。
 - `docs/面试手册.md`：项目介绍、Q&A、简历落地与回答策略。
+- `docs/优化路线.md`：已完成优化与剩余方向。
